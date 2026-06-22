@@ -2,7 +2,7 @@
   "profiles": {
     "fileindexer (E: drive)": {
       "commandName": "Project",
-      "commandLineArgs": "--drives E"
+      "commandLineArgs": "--drives C,E"
     }
   }
 }

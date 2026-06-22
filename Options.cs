@@ -14,6 +14,13 @@ public sealed partial class Options
     /// <summary>Table recording directories that couldn't be enumerated during a scan.</summary>
     public string SkipTableName { get; set; } = "dbo.ScanSkips";
 
+    /// <summary>
+    /// Table recording one row per scan run (start/finish time and status), so that scans which
+    /// never completed can be detected and excluded from analysis. This is a persistent audit log
+    /// and is never dropped by <c>--recreate</c>.
+    /// </summary>
+    public string ScanTableName { get; set; } = "dbo.Scans";
+
     /// <summary>When true, file contents are hashed (SHA-256). Disable for a fast metadata-only inventory.</summary>
     public bool ComputeHash { get; set; } = true;
 
@@ -84,6 +91,10 @@ public sealed partial class Options
 
                 case "--skip-table":
                     o.SkipTableName = Next(arg);
+                    break;
+
+                case "--scan-table":
+                    o.ScanTableName = Next(arg);
                     break;
 
                 case "--no-hash":

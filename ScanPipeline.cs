@@ -24,6 +24,9 @@ public sealed class ScanPipeline
 
     public async Task<int> RunAsync(IReadOnlyList<string> roots, CancellationToken ct)
     {
+        // Log the run as started; it stays "Running" with no completion time until we stamp it below.
+        await _writer.BeginScanAsync(roots, ct);
+
         // Give producers enough headroom to keep hashing while the consumer is mid-flush.
         const int batchHeadroomFactor = 2;
         var channel = Channel.CreateBounded<FileRecord>(new BoundedChannelOptions(_options.BatchSize * batchHeadroomFactor)
@@ -63,6 +66,7 @@ public sealed class ScanPipeline
             await consumer;
             await _writer.FlushAsync(CancellationToken.None);
             await _writer.WriteSkipsAsync(_scanner.Skips.ToArray(), CancellationToken.None);
+            await _writer.CompleteScanAsync("Completed", null, CancellationToken.None);
             return 0;
         }
         catch (OperationCanceledException)
@@ -72,12 +76,15 @@ public sealed class ScanPipeline
             try { await consumer; } catch { /* ignore */ }
             try { await _writer.FlushAsync(CancellationToken.None); } catch { /* ignore */ }
             try { await _writer.WriteSkipsAsync(_scanner.Skips.ToArray(), CancellationToken.None); } catch { /* ignore */ }
+            // Record the partial run as canceled; its rows must not be treated as a complete inventory.
+            try { await _writer.CompleteScanAsync("Canceled", null, CancellationToken.None); } catch { /* ignore */ }
             return 130;
         }
         catch (Exception ex)
         {
             channel.Writer.TryComplete(ex);
             _reporter.ReportFatalError(ex.Message);
+            try { await _writer.CompleteScanAsync("Failed", ex.Message, CancellationToken.None); } catch { /* ignore */ }
             return 1;
         }
     }

@@ -40,8 +40,9 @@ public sealed record DuplicateAnalysis(
 
 /// <summary>
 /// Queries the scanned file table for content that exists in multiple locations and ranks the worst
-/// offenders by wasted space. Only the most recent scan run is considered, so files that were present
-/// in an earlier scan but have since been deleted from disk are excluded. Files are considered
+/// offenders by wasted space. Only the most recent <em>completed</em> scan run is considered (per the
+/// scan log), so files that were present in an earlier scan but have since been deleted from disk are
+/// excluded, and partial data from a scan that never finished is never analyzed. Files are considered
 /// identical when their content hash and size both match; rows without a hash are ignored.
 /// </summary>
 public sealed class DuplicateAnalyzer
@@ -60,9 +61,11 @@ public sealed class DuplicateAnalyzer
         await using var conn = new SqlConnection(_options.ConnectionString);
         await conn.OpenAsync(ct);
 
-        (string? runId, DateTime? scannedAt) = await GetLatestScanRunAsync(conn, ct);
+        (string? runId, DateTime? scannedAt) = await GetLatestCompletedScanAsync(conn, ct);
         if (runId is null)
-            return new DuplicateAnalysis(null, null, 0, Array.Empty<DuplicateGroup>());
+            throw new InvalidOperationException(
+                $"No completed scan found in '{_options.ScanTableName}'. Run a scan to completion before analyzing " +
+                "(scans that were canceled, failed, or never finished are not eligible for analysis).");
 
         long totalWasted = await QueryTotalWastedAsync(conn, runId, ct);
         List<DuplicateGroup> groups = await QueryTopGroupsAsync(conn, runId, topN, ct);
@@ -73,14 +76,21 @@ public sealed class DuplicateAnalyzer
         return new DuplicateAnalysis(runId, scannedAt, totalWasted, groups);
     }
 
-    /// <summary>The scan run that wrote the most recent row, identified by its latest <c>ScannedAtUtc</c>.</summary>
-    private async Task<(string? RunId, DateTime? ScannedAt)> GetLatestScanRunAsync(SqlConnection conn, CancellationToken ct)
+    /// <summary>
+    /// The run to analyze: the most recent <em>completed</em> scan from the scan log, or (null, null)
+    /// if none exists. Only completed runs are eligible — partial data from a canceled, failed, or
+    /// never-finished scan is never analyzed.
+    /// </summary>
+    private async Task<(string? RunId, DateTime? CompletedAt)> GetLatestCompletedScanAsync(SqlConnection conn, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
+        // Guard against the log table not existing (older databases / analyze-only runs).
         cmd.CommandText = $@"
-SELECT TOP (1) ScanRunId, ScannedAtUtc
-FROM {_options.TableName}
-ORDER BY ScannedAtUtc DESC, Id DESC;";
+IF OBJECT_ID('{_options.ScanTableName}', 'U') IS NOT NULL
+    SELECT TOP (1) ScanRunId, CompletedAtUtc
+    FROM {_options.ScanTableName}
+    WHERE Status = 'Completed'
+    ORDER BY CompletedAtUtc DESC;";
         cmd.CommandTimeout = 0;
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);

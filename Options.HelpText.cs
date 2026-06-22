@@ -20,6 +20,8 @@ public sealed partial class Options
         sb.AppendLine("  -t, --table <name>           Destination table. Default: dbo.Files");
         sb.AppendLine("      --skip-table <name>      Table for skipped (inaccessible) directories.");
         sb.AppendLine("                               Default: dbo.ScanSkips");
+        sb.AppendLine("      --scan-table <name>      Audit log of scan runs (start/finish time, status).");
+        sb.AppendLine("                               Default: dbo.Scans (never dropped by --recreate)");
         sb.AppendLine("      --no-hash                Record metadata only; skip content hashing (much faster).");
         sb.AppendLine("      --max-hash-mb <n>        Skip hashing files larger than n MB (still records metadata).");
         sb.AppendLine("      --batch-size <n>         Rows per bulk-copy flush. Default: 5000");

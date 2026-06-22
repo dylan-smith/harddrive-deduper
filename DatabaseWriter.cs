@@ -48,6 +48,52 @@ END";
 
         await ExecuteAsync(CreateTableSql(), ct);
         await ExecuteAsync(CreateSkipsTableSql(), ct);
+
+        // The scan log is an audit history across runs, so it is created but never dropped here.
+        await ExecuteAsync(CreateScansTableSql(), ct);
+    }
+
+    /// <summary>
+    /// Record the start of this scan run: inserts a row tagged <c>Running</c> with no completion time.
+    /// A row that stays <c>Running</c> (or keeps a NULL <c>CompletedAtUtc</c>) marks a scan that never
+    /// finished — e.g. the process was killed — and can be excluded from analysis.
+    /// </summary>
+    public async Task BeginScanAsync(IReadOnlyList<string> roots, CancellationToken ct)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO {_options.ScanTableName}
+    (ScanRunId, StartedAtUtc, Status, MachineName, Roots, ComputeHash)
+VALUES (@id, @started, @status, @machine, @roots, @hash);";
+        cmd.Parameters.AddWithValue("@id", _scanRunId);
+        cmd.Parameters.AddWithValue("@started", DateTime.UtcNow);
+        cmd.Parameters.AddWithValue("@status", "Running");
+        cmd.Parameters.AddWithValue("@machine", Environment.MachineName);
+        cmd.Parameters.AddWithValue("@roots", string.Join(", ", roots));
+        cmd.Parameters.AddWithValue("@hash", _options.ComputeHash);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Stamp this scan run as finished: sets the completion time, final status (e.g. <c>Completed</c>,
+    /// <c>Canceled</c>, <c>Failed</c>), the number of file rows written, and any fatal error message.
+    /// </summary>
+    public async Task CompleteScanAsync(string status, string? error, CancellationToken ct)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = $@"
+UPDATE {_options.ScanTableName}
+SET CompletedAtUtc = @completed,
+    Status         = @status,
+    FilesWritten   = @files,
+    ScanError      = @error
+WHERE ScanRunId = @id;";
+        cmd.Parameters.AddWithValue("@completed", DateTime.UtcNow);
+        cmd.Parameters.AddWithValue("@status", status);
+        cmd.Parameters.AddWithValue("@files", RowsWritten);
+        cmd.Parameters.AddWithValue("@error", (object?)error ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@id", _scanRunId);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
@@ -179,6 +225,23 @@ BEGIN
         ScannedAtUtc DATETIME2(3)   NOT NULL
     );
     CREATE INDEX IX_ScanSkips_ScanRunId ON {_options.SkipTableName} (ScanRunId);
+END";
+
+    private string CreateScansTableSql() => $@"
+IF OBJECT_ID('{_options.ScanTableName}', 'U') IS NULL
+BEGIN
+    CREATE TABLE {_options.ScanTableName} (
+        ScanRunId      CHAR(32)      NOT NULL PRIMARY KEY,
+        StartedAtUtc   DATETIME2(3)  NOT NULL,
+        CompletedAtUtc DATETIME2(3)  NULL,
+        Status         NVARCHAR(20)  NOT NULL,
+        MachineName    NVARCHAR(256) NULL,
+        Roots          NVARCHAR(MAX) NULL,
+        ComputeHash    BIT           NOT NULL,
+        FilesWritten   BIGINT        NULL,
+        ScanError      NVARCHAR(MAX) NULL
+    );
+    CREATE INDEX IX_Scans_Status ON {_options.ScanTableName} (Status);
 END";
 
     /// <summary>Create the target database if the connection points at one that doesn't exist yet.</summary>
