@@ -48,6 +48,15 @@ public sealed partial class Options
     /// <summary>How many duplicate sets to list in analysis mode (ranked by wasted space).</summary>
     public int TopN { get; set; } = 10;
 
+    /// <summary>
+    /// Prune the database instead of scanning: keep only the most recent completed scan of each drive
+    /// and delete every other scan's file/skip rows. Assumes no scan is currently running.
+    /// </summary>
+    public bool Cleanup { get; set; }
+
+    /// <summary>With <c>--cleanup</c>, report what would be deleted without deleting anything.</summary>
+    public bool DryRun { get; set; }
+
     public bool ShowHelp { get; set; }
 
     public static Options Parse(string[] args)
@@ -132,6 +141,15 @@ public sealed partial class Options
 
                 case "--top":
                     o.TopN = Math.Max(1, int.Parse(Next(arg)));
+                    break;
+
+                case "--cleanup":
+                case "--clean":
+                    o.Cleanup = true;
+                    break;
+
+                case "--dry-run":
+                    o.DryRun = true;
                     break;
 
                 default:

@@ -41,6 +41,13 @@ public sealed partial class Options
         sb.AppendLine("      --no-analyze             Scan only; skip the post-scan duplicate analysis.");
         sb.AppendLine("      --top <n>                Number of duplicate sets to list. Default: 10");
         sb.AppendLine();
+        sb.AppendLine("CLEANUP (prune the database; does NOT scan):");
+        sb.AppendLine("      --cleanup, --clean       Keep only the latest COMPLETED scan of each drive and");
+        sb.AppendLine("                               delete every other run's file/skip rows. Considers all");
+        sb.AppendLine("                               drives regardless of --drives. The scan audit log");
+        sb.AppendLine("                               (dbo.Scans) is preserved. Assumes no scan is running.");
+        sb.AppendLine("      --dry-run                With --cleanup, report what would be deleted, delete nothing.");
+        sb.AppendLine();
         sb.AppendLine("EXAMPLES:");
         sb.AppendLine("  fileindexer --drives C,D");
         sb.AppendLine("  fileindexer -c \"Server=.;Database=FileInventory;User Id=sa;Password=***;TrustServerCertificate=true\"");
@@ -48,6 +55,8 @@ public sealed partial class Options
         sb.AppendLine("  fileindexer --analyze");
         sb.AppendLine("  fileindexer --analyze --top 25");
         sb.AppendLine("  fileindexer --analyze --drives C,D   (combine only C and D's latest scans)");
+        sb.AppendLine("  fileindexer --cleanup --dry-run      (preview what cleanup would delete)");
+        sb.AppendLine("  fileindexer --cleanup                (prune to the latest completed scan per drive)");
         return sb.ToString();
     }
 }

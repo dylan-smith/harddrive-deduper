@@ -53,6 +53,53 @@ if (options.Analyze)
     }
 }
 
+// Cleanup mode prunes the database (keep the latest completed scan per drive) and exits without
+// touching the drives. Assumes no scan is currently running.
+if (options.Cleanup)
+{
+    try
+    {
+        var cleaner = new DatabaseCleaner(options);
+        Console.WriteLine("Determining retained runs (latest completed scan per drive)...");
+        CleanupPlan plan = await cleaner.PlanAsync(cts.Token);
+
+        Console.WriteLine($"Retaining {plan.KeptScans.Count} run(s):");
+        foreach (ScanRef s in plan.KeptScans)
+            Console.WriteLine($"  {s.Drive,-6} {s.ScanRunId}  completed {s.CompletedAtUtc:u}");
+        Console.WriteLine($"Rows to delete: {plan.FilesToDelete:n0} file(s), {plan.SkipsToDelete:n0} skip(s).");
+        Console.WriteLine("The scan audit log is preserved.");
+
+        if (plan.FilesToDelete == 0 && plan.SkipsToDelete == 0)
+        {
+            Console.WriteLine("Nothing to delete; database is already clean.");
+            return 0;
+        }
+
+        if (options.DryRun)
+        {
+            Console.WriteLine("Dry run: no rows were deleted.");
+            return 0;
+        }
+
+        var progress = new Progress<long>(n => Console.Write($"\rDeleting... {n:n0} rows removed"));
+        CleanupResult result = await cleaner.ExecuteAsync(plan, progress, cts.Token);
+        Console.WriteLine();
+        Console.WriteLine($"Deleted {result.FilesDeleted:n0} file row(s) and {result.SkipsDeleted:n0} skip row(s).");
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("\nCleanup canceled.");
+        return 130;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine("Cleanup failed:");
+        Console.Error.WriteLine("  " + ex.Message);
+        return 3;
+    }
+}
+
 if (!OperatingSystem.IsWindows())
 {
     Console.Error.WriteLine("Warning: this tool targets Windows drive semantics; behavior on other platforms is best-effort.");
