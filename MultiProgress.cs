@@ -23,16 +23,19 @@ public sealed class MultiProgress : IAsyncDisposable
 
         private readonly string _header;
         private readonly bool _hasHashPass;
+        private readonly bool _hasFolderPass;
 
         // Set by the scanning task when each pass begins; read by the render timer. Reference writes
         // are atomic, and a slightly stale read just shows last second's numbers — both fine here.
         private volatile Func<string>? _enumerate;
         private volatile Func<string>? _hash;
+        private volatile Func<string>? _folders;
 
-        internal Slot(string header, bool hasHashPass)
+        internal Slot(string header, bool hasHashPass, bool hasFolderPass)
         {
             _header = header;
             _hasHashPass = hasHashPass;
+            _hasFolderPass = hasFolderPass;
         }
 
         /// <summary>Begin (or update) the pass-one line; <paramref name="snapshot"/> supplies its live text.</summary>
@@ -41,8 +44,11 @@ public sealed class MultiProgress : IAsyncDisposable
         /// <summary>Begin (or update) the pass-two line; <paramref name="snapshot"/> supplies its live text.</summary>
         public void StartHash(Func<string> snapshot) => _hash = snapshot;
 
+        /// <summary>Begin (or update) the pass-three (folder fingerprint) line.</summary>
+        public void StartFolders(Func<string> snapshot) => _folders = snapshot;
+
         /// <summary>How many console lines this slot occupies — fixed for the slot's lifetime.</summary>
-        internal int LineCount => _hasHashPass ? 3 : 2;
+        internal int LineCount => 1 + (_hasHashPass ? 1 : 0) + (_hasFolderPass ? 1 : 0) + 1;
 
         internal IEnumerable<string> Lines()
         {
@@ -50,6 +56,8 @@ public sealed class MultiProgress : IAsyncDisposable
             yield return "    pass 1 enumerate: " + (_enumerate is { } e ? e() : Pending);
             if (_hasHashPass)
                 yield return "    pass 2 hash: " + (_hash is { } h ? h() : Pending);
+            if (_hasFolderPass)
+                yield return "    pass 3 folders: " + (_folders is { } f ? f() : Pending);
         }
     }
 

@@ -45,6 +45,9 @@ END";
     /// <summary>Total rows written across every drive scanned this process (for the final summary).</summary>
     public long RowsWritten;
 
+    /// <summary>Total folder fingerprint rows written across every drive scanned this process.</summary>
+    public long FoldersWritten;
+
     public DatabaseWriter(Options options)
     {
         _options = options;
@@ -72,6 +75,8 @@ END";
         }
 
         await ExecuteAsync(CreateTableSql(), ct);
+        // Bring an older file table (created before folder fingerprints) up to the current schema.
+        await ExecuteAsync(MigrateFilesTableSql(), ct);
         await ExecuteAsync(CreateSkipsTableSql(), ct);
 
         // The scan log is an audit history across runs, so it is created but never dropped here.
@@ -174,6 +179,7 @@ WHERE ScanRunId = @id;";
     public async Task AddAsync(FileRecord r, CancellationToken ct)
     {
         DataRow row = _buffer.NewRow();
+        row["EntryType"] = "F";
         row["FileName"] = Truncate(r.FileName, FileNameMaxLength);
         row["FullPath"] = r.FullPath;
         row["SizeBytes"] = r.SizeBytes;
@@ -300,6 +306,77 @@ FROM {_options.TableName} f
 INNER JOIN {HashStagingTable} h ON f.Id = h.Id;", ct);
     }
 
+    // --- pass three: folder fingerprints --------------------------------
+
+    /// <summary>
+    /// Stream this scan run's file rows ordered by content hash, invoking <paramref name="onFile"/> for
+    /// each. Ordering by hash means each folder's descendant hashes arrive sorted, so the fingerprinter
+    /// produces a deterministic result; the reader stays forward-only so memory stays bounded. Folder
+    /// rows (<c>EntryType = 'D'</c>) are excluded so re-running the pass never folds folders into folders.
+    /// </summary>
+    public async Task StreamHashedFilesAsync(Action<HashedFile> onFile, CancellationToken ct)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = $@"
+SELECT FullPath, ContentHash, SizeBytes, DateModifiedUtc, DateCreatedUtc
+FROM {_options.TableName}
+WHERE ScanRunId = @id AND EntryType = 'F'
+ORDER BY ContentHash;";
+        cmd.CommandTimeout = 0;
+        cmd.Parameters.AddWithValue("@id", _scanRunId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            string? hash = reader.IsDBNull(1) ? null : reader.GetString(1).TrimEnd();
+            onFile(new HashedFile(
+                reader.GetString(0), hash, reader.GetInt64(2), reader.GetDateTime(3), reader.GetDateTime(4)));
+        }
+    }
+
+    /// <summary>
+    /// Bulk-insert the folder fingerprint rows for this scan run into the file table, tagged with
+    /// <c>EntryType = 'D'</c> and this run's <c>ScanRunId</c>. Safe to call with an empty set.
+    /// </summary>
+    public async Task WriteFoldersAsync(IReadOnlyCollection<FolderRecord> folders, CancellationToken ct)
+    {
+        if (folders.Count == 0)
+            return;
+
+        var table = new DataTable();
+        foreach (DataColumn col in _buffer.Columns)
+            table.Columns.Add(col.ColumnName, col.DataType);
+
+        DateTime now = DateTime.UtcNow;
+        foreach (FolderRecord f in folders)
+        {
+            DataRow row = table.NewRow();
+            row["EntryType"] = "D";
+            row["FileName"] = Truncate(f.FileName, FileNameMaxLength);
+            row["FullPath"] = f.FullPath;
+            row["SizeBytes"] = f.SizeBytes;
+            row["DateModifiedUtc"] = f.DateModifiedUtc;
+            row["DateCreatedUtc"] = f.DateCreatedUtc;
+            row["ContentHash"] = (object?)f.ContentHash ?? DBNull.Value;
+            row["ScanError"] = DBNull.Value;
+            row["ScanRunId"] = _scanRunId;
+            row["ScannedAtUtc"] = now;
+            table.Rows.Add(row);
+        }
+
+        using var bulk = new SqlBulkCopy(_connection)
+        {
+            DestinationTableName = _options.TableName,
+            BulkCopyTimeout = 0,
+            BatchSize = _options.BatchSize,
+        };
+        foreach (DataColumn col in table.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+
+        await bulk.WriteToServerAsync(table, ct);
+        FoldersWritten += folders.Count;
+    }
+
     // --- helpers ---------------------------------------------------------
 
     private static DataTable BuildHashStagingTable()
@@ -314,6 +391,7 @@ INNER JOIN {HashStagingTable} h ON f.Id = h.Id;", ct);
     private static DataTable BuildSchemaTable()
     {
         var t = new DataTable();
+        t.Columns.Add("EntryType", typeof(string));
         t.Columns.Add("FileName", typeof(string));
         t.Columns.Add("FullPath", typeof(string));
         t.Columns.Add("SizeBytes", typeof(long));
@@ -334,6 +412,7 @@ IF OBJECT_ID('{_options.TableName}', 'U') IS NULL
 BEGIN
     CREATE TABLE {_options.TableName} (
         Id              BIGINT IDENTITY(1,1) PRIMARY KEY,
+        EntryType       CHAR(1)        NOT NULL,  -- 'F' = file, 'D' = folder fingerprint
         FileName        NVARCHAR({FileNameMaxLength})  NOT NULL,
         FullPath        NVARCHAR(MAX)  NOT NULL,
         SizeBytes       BIGINT         NOT NULL,
@@ -344,8 +423,20 @@ BEGIN
         ScanRunId       CHAR(32)       NOT NULL,
         ScannedAtUtc    DATETIME2(3)   NOT NULL
     );
-    CREATE INDEX IX_Files_ContentHash ON {_options.TableName} (ContentHash) WHERE ContentHash IS NOT NULL;
-    CREATE INDEX IX_Files_SizeBytes   ON {_options.TableName} (SizeBytes);
+    -- Duplicate analysis groups by (EntryType, ContentHash, SizeBytes), so lead with those columns.
+    CREATE INDEX IX_Files_Dup       ON {_options.TableName} (EntryType, ContentHash, SizeBytes) WHERE ContentHash IS NOT NULL;
+    CREATE INDEX IX_Files_SizeBytes ON {_options.TableName} (SizeBytes);
+END";
+
+    /// <summary>
+    /// Add the <c>EntryType</c> discriminator to a file table created before folder fingerprints existed.
+    /// Pre-existing rows are all files, so the column defaults to <c>'F'</c> (which backfills them).
+    /// </summary>
+    private string MigrateFilesTableSql() => $@"
+IF OBJECT_ID('{_options.TableName}', 'U') IS NOT NULL
+   AND COL_LENGTH('{_options.TableName}', 'EntryType') IS NULL
+BEGIN
+    ALTER TABLE {_options.TableName} ADD EntryType CHAR(1) NOT NULL DEFAULT 'F';
 END";
 
     private string DropSkipsTableSql() =>

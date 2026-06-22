@@ -35,10 +35,19 @@ public sealed record ScanRef(string Drive, string ScanRunId, DateTime CompletedA
 /// Reclaimable space across <em>every</em> duplicate set in the combined runs, not just the ones in
 /// <see cref="Groups"/>. This is the grand total the user could recover by deduplicating.
 /// </param>
+/// <param name="FolderGroups">
+/// Duplicate <em>folders</em> — directory trees whose entire content (the set of all descendant file
+/// hashes) is identical — ranked by wasted space. Nested copies are pruned: a folder is never grouped
+/// with its own ancestor or descendant (only the topmost of any such chain is kept), so every set lists
+/// independently deletable trees. These bytes overlap <see cref="Groups"/> and <see cref="TotalWastedBytes"/>
+/// (the same redundant files, viewed at folder granularity); they let a whole redundant tree be reclaimed
+/// at once rather than file by file.
+/// </param>
 public sealed record DuplicateAnalysis(
     IReadOnlyList<ScanRef> Scans,
     long TotalWastedBytes,
-    IReadOnlyList<DuplicateGroup> Groups);
+    IReadOnlyList<DuplicateGroup> Groups,
+    IReadOnlyList<DuplicateGroup> FolderGroups);
 
 /// <summary>
 /// Queries the scanned file table for content that exists in multiple locations and ranks the worst
@@ -79,12 +88,15 @@ public sealed class DuplicateAnalyzer
 
         var runIds = scans.Select(s => s.ScanRunId).ToList();
         long totalWasted = await QueryTotalWastedAsync(conn, runIds, ct);
-        List<DuplicateGroup> groups = await QueryTopGroupsAsync(conn, runIds, topN, ct);
+        List<DuplicateGroup> groups = await QueryTopFileGroupsAsync(conn, runIds, topN, ct);
+        List<DuplicateGroup> folderGroups = await QueryTopFolderGroupsAsync(conn, runIds, topN, ct);
 
         foreach (DuplicateGroup g in groups)
-            await LoadSamplePathsAsync(conn, runIds, g, samplePathsPerGroup, ct);
+            await LoadFileSamplePathsAsync(conn, runIds, g, samplePathsPerGroup, ct);
+        foreach (DuplicateGroup g in folderGroups)
+            await LoadFolderSamplePathsAsync(conn, runIds, g, samplePathsPerGroup, ct);
 
-        return new DuplicateAnalysis(scans, totalWasted, groups);
+        return new DuplicateAnalysis(scans, totalWasted, groups, folderGroups);
     }
 
     /// <summary>
@@ -146,7 +158,7 @@ SELECT COALESCE(SUM(WastedBytes), 0)
 FROM (
     SELECT CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes AS WastedBytes
     FROM {_options.TableName}
-    WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL
+    WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL AND EntryType = 'F'
     GROUP BY ContentHash, SizeBytes
     HAVING COUNT(*) > 1
 ) AS perGroup;";
@@ -156,7 +168,7 @@ FROM (
         return result is long total ? total : Convert.ToInt64(result);
     }
 
-    private async Task<List<DuplicateGroup>> QueryTopGroupsAsync(
+    private async Task<List<DuplicateGroup>> QueryTopFileGroupsAsync(
         SqlConnection conn, IReadOnlyList<string> runIds, int topN, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
@@ -170,13 +182,49 @@ SELECT TOP (@topN)
     MIN(FileName)                             AS SampleName,
     COUNT(DISTINCT FileName)                  AS DistinctNameCount
 FROM {_options.TableName}
-WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL
+WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL AND EntryType = 'F'
 GROUP BY ContentHash, SizeBytes
 HAVING COUNT(*) > 1
 ORDER BY WastedBytes DESC;";
         cmd.CommandTimeout = 0;
         cmd.Parameters.AddWithValue("@topN", topN);
 
+        return await ReadGroupsAsync(cmd, ct);
+    }
+
+    /// <summary>
+    /// Duplicate folders, ranked by wasted space, with nested copies pruned: within each set of
+    /// same-fingerprint folders, any folder that is a descendant of another in the set is dropped (only
+    /// the topmost is kept), then sets with fewer than two remaining copies are discarded. This stops a
+    /// folder being reported as a duplicate of its own ancestor/descendant — e.g. a folder whose only
+    /// child is a subfolder with the same content — which can't be deleted to reclaim space.
+    /// </summary>
+    private async Task<List<DuplicateGroup>> QueryTopFolderGroupsAsync(
+        SqlConnection conn, IReadOnlyList<string> runIds, int topN, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        string inClause = BuildRunIdInClause(cmd, runIds);
+        cmd.CommandText = $@"
+{IndependentFoldersCte(inClause)}
+SELECT TOP (@topN)
+    ContentHash,
+    SizeBytes,
+    COUNT(*)                                  AS CopyCount,
+    CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes  AS WastedBytes,
+    MIN(FileName)                             AS SampleName,
+    COUNT(DISTINCT FileName)                  AS DistinctNameCount
+FROM Independent
+GROUP BY ContentHash, SizeBytes
+HAVING COUNT(*) > 1
+ORDER BY WastedBytes DESC;";
+        cmd.CommandTimeout = 0;
+        cmd.Parameters.AddWithValue("@topN", topN);
+
+        return await ReadGroupsAsync(cmd, ct);
+    }
+
+    private static async Task<List<DuplicateGroup>> ReadGroupsAsync(SqlCommand cmd, CancellationToken ct)
+    {
         var groups = new List<DuplicateGroup>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -194,7 +242,7 @@ ORDER BY WastedBytes DESC;";
         return groups;
     }
 
-    private async Task LoadSamplePathsAsync(
+    private async Task LoadFileSamplePathsAsync(
         SqlConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
@@ -202,17 +250,68 @@ ORDER BY WastedBytes DESC;";
         cmd.CommandText = $@"
 SELECT TOP (@limit) FullPath
 FROM {_options.TableName}
-WHERE ScanRunId IN ({inClause}) AND ContentHash = @hash AND SizeBytes = @size
+WHERE ScanRunId IN ({inClause}) AND ContentHash = @hash AND SizeBytes = @size AND EntryType = 'F'
 ORDER BY FullPath;";
         cmd.CommandTimeout = 0;
         cmd.Parameters.AddWithValue("@limit", limit);
         cmd.Parameters.AddWithValue("@hash", g.ContentHash);
         cmd.Parameters.AddWithValue("@size", g.SizeBytes);
 
+        await ReadSamplePathsAsync(cmd, g, ct);
+    }
+
+    /// <summary>Sample locations for a duplicate folder set, listing only the pruned (topmost) copies.</summary>
+    private async Task LoadFolderSamplePathsAsync(
+        SqlConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        string inClause = BuildRunIdInClause(cmd, runIds);
+        cmd.CommandText = $@"
+{IndependentFoldersCte(inClause)}
+SELECT TOP (@limit) FullPath
+FROM Independent
+WHERE ContentHash = @hash AND SizeBytes = @size
+ORDER BY FullPath;";
+        cmd.CommandTimeout = 0;
+        cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.AddWithValue("@hash", g.ContentHash);
+        cmd.Parameters.AddWithValue("@size", g.SizeBytes);
+
+        await ReadSamplePathsAsync(cmd, g, ct);
+    }
+
+    private static async Task ReadSamplePathsAsync(SqlCommand cmd, DuplicateGroup g, CancellationToken ct)
+    {
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
             g.SamplePaths.Add(reader.GetString(0));
     }
+
+    /// <summary>
+    /// A CTE named <c>Independent</c> over this run's hashed folder rows, excluding any folder that is a
+    /// descendant of another folder sharing its fingerprint and size. "Descendant" is a pure path-prefix
+    /// test: <c>f</c> is under <c>a</c> when <c>a</c>'s path is a prefix of <c>f</c>'s ending at a path
+    /// separator (so <c>C:\foo</c> is an ancestor of <c>C:\foo\bar</c> but not of <c>C:\foobar</c>). The
+    /// run-id <c>IN</c> clause is shared with the caller's command, which must have added those parameters.
+    /// </summary>
+    private string IndependentFoldersCte(string inClause) => $@"
+WITH F AS (
+    SELECT FullPath, FileName, ContentHash, SizeBytes
+    FROM {_options.TableName}
+    WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL AND EntryType = 'D'
+),
+Independent AS (
+    SELECT f.FullPath, f.FileName, f.ContentHash, f.SizeBytes
+    FROM F f
+    WHERE NOT EXISTS (
+        SELECT 1 FROM F a
+        WHERE a.ContentHash = f.ContentHash
+          AND a.SizeBytes   = f.SizeBytes
+          AND LEN(f.FullPath) > LEN(a.FullPath)
+          AND LEFT(f.FullPath, LEN(a.FullPath)) = a.FullPath
+          AND (RIGHT(a.FullPath, 1) = '\' OR SUBSTRING(f.FullPath, LEN(a.FullPath) + 1, 1) = '\')
+    )
+)";
 
     /// <summary>
     /// Add a <c>@run{i}</c> parameter for each scan id and return the comma-separated parameter list

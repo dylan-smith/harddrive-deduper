@@ -66,7 +66,7 @@ if (options.Cleanup)
         Console.WriteLine($"Retaining {plan.KeptScans.Count} run(s):");
         foreach (ScanRef s in plan.KeptScans)
             Console.WriteLine($"  {s.Drive,-6} {s.ScanRunId}  completed {s.CompletedAtUtc:u}");
-        Console.WriteLine($"Rows to delete: {plan.FilesToDelete:n0} file(s), {plan.SkipsToDelete:n0} skip(s).");
+        Console.WriteLine($"Rows to delete: {plan.FilesToDelete:n0} file/folder row(s), {plan.SkipsToDelete:n0} skip(s).");
         Console.WriteLine("The scan audit log is preserved.");
 
         if (plan.FilesToDelete == 0 && plan.SkipsToDelete == 0)

@@ -24,6 +24,12 @@ public sealed partial class Options
     /// <summary>When true, file contents are hashed (SHA-256). Disable for a fast metadata-only inventory.</summary>
     public bool ComputeHash { get; set; } = true;
 
+    /// <summary>
+    /// When true (and hashing is on), a content fingerprint is computed for every folder from its
+    /// descendant file hashes — no files are re-read. Disable with <c>--no-folder-hash</c>.
+    /// </summary>
+    public bool ComputeFolderFingerprints { get; set; } = true;
+
     /// <summary>Skip hashing files larger than this (bytes). 0 = no limit.</summary>
     public long MaxHashBytes { get; set; } = 0;
 
@@ -108,6 +114,11 @@ public sealed partial class Options
 
                 case "--no-hash":
                     o.ComputeHash = false;
+                    break;
+
+                case "--no-folder-hash":
+                case "--no-folders":
+                    o.ComputeFolderFingerprints = false;
                     break;
 
                 case "--max-hash-mb":

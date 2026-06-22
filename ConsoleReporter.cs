@@ -25,11 +25,11 @@ public sealed class ConsoleReporter
     /// their own progress at the same time. Wire each returned <see cref="MultiProgress.Slot"/> to its
     /// drive's passes; dispose (await) the display to stop repainting and leave the final values shown.
     /// </summary>
-    public MultiProgress StartMultiProgress(IReadOnlyList<string> drives, bool hasHashPass)
+    public MultiProgress StartMultiProgress(IReadOnlyList<string> drives, bool hasHashPass, bool hasFolderPass)
     {
         var slots = new MultiProgress.Slot[drives.Count];
         for (int i = 0; i < drives.Count; i++)
-            slots[i] = new MultiProgress.Slot($"[{i + 1}/{drives.Count}] {drives[i]}", hasHashPass);
+            slots[i] = new MultiProgress.Slot($"[{i + 1}/{drives.Count}] {drives[i]}", hasHashPass, hasFolderPass);
         return new MultiProgress(slots);
     }
 
@@ -53,6 +53,8 @@ public sealed class ConsoleReporter
         Console.WriteLine($"  Files seen:       {totals.FilesSeen:N0}");
         Console.WriteLine($"  Rows written:     {totals.RowsWritten:N0}");
         Console.WriteLine($"  Files hashed:     {totals.FilesHashed:N0}");
+        if (totals.FoldersWritten > 0)
+            Console.WriteLine($"  Folders fingerprinted: {totals.FoldersWritten:N0}");
         string skipNote = totals.DirectoriesSkipped > 0 ? $"  (logged to {_options.SkipTableName})" : "";
         Console.WriteLine($"  Directories skipped (access): {totals.DirectoriesSkipped:N0}{skipNote}");
         Console.WriteLine($"  Hash errors:      {totals.HashErrors:N0}");
@@ -82,21 +84,40 @@ public sealed class ConsoleReporter
         Console.WriteLine();
 
         IReadOnlyList<DuplicateGroup> groups = analysis.Groups;
-        if (groups.Count == 0)
+        if (groups.Count == 0 && analysis.FolderGroups.Count == 0)
         {
             Console.WriteLine("No duplicates found — no hashed content appears at more than one location.");
             return;
         }
 
-        Console.WriteLine($"Total wasted space across all duplicate set(s): {FormatBytes(analysis.TotalWastedBytes)}");
-        Console.WriteLine();
-        Console.WriteLine($"Top {Math.Min(topN, groups.Count)} duplicate set(s) by wasted space (redundant copies × size):");
-        Console.WriteLine();
+        if (groups.Count > 0)
+        {
+            Console.WriteLine($"Total wasted space across all duplicate file set(s): {FormatBytes(analysis.TotalWastedBytes)}");
+            Console.WriteLine();
+            Console.WriteLine($"Top {Math.Min(topN, groups.Count)} duplicate file set(s) by wasted space (redundant copies × size):");
+            Console.WriteLine();
+            PrintGroups(groups, "<filenames differ>");
+        }
 
+        // Duplicate folders are the same redundant files seen at directory granularity — deleting one
+        // whole redundant tree reclaims the space in a single step. Their bytes overlap the file totals
+        // above, so they are reported separately rather than added in.
+        if (analysis.FolderGroups.Count > 0)
+        {
+            Console.WriteLine($"Top {Math.Min(topN, analysis.FolderGroups.Count)} duplicate folder(s) — identical directory trees");
+            Console.WriteLine("(wasted space overlaps the file totals above; delete a redundant tree to reclaim it):");
+            Console.WriteLine();
+            PrintGroups(analysis.FolderGroups, "<folder names differ>");
+        }
+    }
+
+    /// <summary>Print one ranked list of duplicate sets (files or folders) with their sample locations.</summary>
+    private static void PrintGroups(IReadOnlyList<DuplicateGroup> groups, string variedNameLabel)
+    {
         int rank = 1;
         foreach (DuplicateGroup g in groups)
         {
-            string name = g.DistinctNameCount == 1 ? g.FileName : "<filenames differ>";
+            string name = g.DistinctNameCount == 1 ? g.FileName : variedNameLabel;
             Console.WriteLine(
                 $"#{rank,-2} {FormatBytes(g.WastedBytes),11} wasted  |  {name}  |  " +
                 $"{g.CopyCount} copies × {FormatBytes(g.SizeBytes)}  |  hash {g.ContentHash[..12]}…");

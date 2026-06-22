@@ -7,6 +7,7 @@ public sealed record ScanTotals(
     long FilesSeen,
     long RowsWritten,
     long FilesHashed,
+    long FoldersWritten,
     long DirectoriesSkipped,
     long HashErrors);
 
@@ -65,7 +66,8 @@ public sealed class ScanPipeline
             }
 
             int[] codes;
-            await using (MultiProgress display = _reporter.StartMultiProgress(roots, _options.ComputeHash))
+            bool hasFolderPass = _options.ComputeHash && _options.ComputeFolderFingerprints;
+            await using (MultiProgress display = _reporter.StartMultiProgress(roots, _options.ComputeHash, hasFolderPass))
             {
                 var tasks = new Task<int>[roots.Count];
                 for (int i = 0; i < roots.Count; i++)
@@ -81,6 +83,7 @@ public sealed class ScanPipeline
                 FilesSeen: scanners.Sum(s => s.FilesSeen),
                 RowsWritten: writers.Sum(w => w.RowsWritten),
                 FilesHashed: scanners.Sum(s => s.FilesHashed),
+                FoldersWritten: writers.Sum(w => w.FoldersWritten),
                 DirectoriesSkipped: scanners.Sum(s => s.DirectoriesSkipped),
                 HashErrors: scanners.Sum(s => s.HashErrors));
 
@@ -112,6 +115,10 @@ public sealed class ScanPipeline
             // Pass two: read the rows back and fill in their content hashes.
             if (_options.ComputeHash)
                 await ComputeHashesAsync(scanner, writer, slot, ct);
+
+            // Pass three: fingerprint every folder from the hashes just written (no files are re-read).
+            if (_options.ComputeHash && _options.ComputeFolderFingerprints)
+                await ComputeFolderFingerprintsAsync(writer, slot, ct);
 
             await writer.WriteSkipsAsync(DrainSkips(scanner), CancellationToken.None);
             await writer.CompleteScanAsync("Completed", null, CancellationToken.None);
@@ -207,6 +214,23 @@ public sealed class ScanPipeline
             await writer.UpdateHashesAsync(updates, ct);
             processed += chunk.Count;
         }
+    }
+
+    /// <summary>
+    /// Pass three: build a content fingerprint for every folder in the tree from the file hashes already
+    /// in the database — so no file is read a second time. Streams this run's file rows ordered by hash
+    /// into a <see cref="FolderFingerprinter"/>, then bulk-inserts one folder row per folder.
+    /// </summary>
+    private static async Task ComputeFolderFingerprintsAsync(
+        DatabaseWriter writer, MultiProgress.Slot slot, CancellationToken ct)
+    {
+        var fingerprinter = new FolderFingerprinter();
+        slot.StartFolders(() => $"folders: {fingerprinter.FolderCount:N0}");
+
+        await writer.StreamHashedFilesAsync(file => fingerprinter.Add(file), ct);
+
+        var folders = fingerprinter.Finish().ToArray();
+        await writer.WriteFoldersAsync(folders, ct);
     }
 
     /// <summary>

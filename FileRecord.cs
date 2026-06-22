@@ -22,3 +22,20 @@ public readonly record struct PendingHash(long Id, string FullPath, long SizeByt
 
 /// <summary>The outcome of hashing one file in pass two, keyed back to its table row by <see cref="Id"/>.</summary>
 public readonly record struct HashResult(long Id, string? ContentHash, string? Error);
+
+/// <summary>
+/// One file's hash plus the fields the folder-fingerprint pass aggregates. Read back from the
+/// database (ordered by content hash) after pass two has filled in the hashes; <see cref="ContentHash"/>
+/// is null for files that were left unhashed (too large, or a hashing error), which taint their folders.
+/// </summary>
+public readonly record struct HashedFile(
+    string FullPath, string? ContentHash, long SizeBytes, DateTime DateModifiedUtc, DateTime DateCreatedUtc);
+
+/// <summary>
+/// A folder row produced by the fingerprint pass: the folder's path, its content fingerprint (a hash of
+/// all descendant file hashes, or null if any descendant was unhashed), and aggregates over its subtree.
+/// Inserted into the same table as files, distinguished by an <c>EntryType</c> of <c>'D'</c>.
+/// </summary>
+public readonly record struct FolderRecord(
+    string FullPath, string FileName, string? ContentHash, long SizeBytes,
+    DateTime DateModifiedUtc, DateTime DateCreatedUtc);
