@@ -75,7 +75,14 @@ internal sealed class ScanPipeline
                 for (var i = 0; i < roots.Count; i++)
                 {
                     var idx = i; // capture per-iteration
-                    tasks[idx] = ScanDriveAsync(roots[idx], scanners[idx], writers[idx], display.Slots[idx], linked);
+                    // ScanDriveAsync is synchronous-blocking under the hood: Microsoft.Data.Sqlite's
+                    // *Async methods complete synchronously and file enumeration is synchronous I/O, so
+                    // its awaits never yield. Calling it directly would run each drive's whole pipeline
+                    // inline before the next task is even created, serializing the drives. Task.Run puts
+                    // each drive on its own thread-pool thread so they actually run concurrently.
+                    tasks[idx] = Task.Run(
+                        () => ScanDriveAsync(roots[idx], scanners[idx], writers[idx], display.Slots[idx], linked),
+                        linked.Token);
                 }
 
                 codes = await Task.WhenAll(tasks);
