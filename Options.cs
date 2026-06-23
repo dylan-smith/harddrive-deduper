@@ -1,3 +1,5 @@
+using Microsoft.Data.Sqlite;
+
 namespace HarddriveDeduper;
 
 /// <summary>Parsed command-line options. Help text lives in <c>Options.HelpText.cs</c>.</summary>
@@ -6,20 +8,24 @@ public sealed partial class Options
     /// <summary>Drive roots to scan, e.g. "C:\", "D:\". Empty means "all fixed drives".</summary>
     public List<string> Drives { get; } = new();
 
-    public string ConnectionString { get; set; } =
-        "Server=localhost;Database=FileInventory;Integrated Security=true;TrustServerCertificate=true;";
+    /// <summary>Path of the SQLite database file. Created automatically if it doesn't exist.</summary>
+    public string DatabasePath { get; set; } = "fileindex.db";
 
-    public string TableName { get; set; } = "dbo.Files";
+    /// <summary>The SQLite connection string for <see cref="DatabasePath"/>, built on demand.</summary>
+    public string ConnectionString =>
+        new SqliteConnectionStringBuilder { DataSource = DatabasePath }.ToString();
+
+    public string TableName { get; set; } = "Files";
 
     /// <summary>Table recording directories that couldn't be enumerated during a scan.</summary>
-    public string SkipTableName { get; set; } = "dbo.ScanSkips";
+    public string SkipTableName { get; set; } = "ScanSkips";
 
     /// <summary>
     /// Table recording one row per scan run (start/finish time and status), so that scans which
     /// never completed can be detected and excluded from analysis. This is a persistent audit log
     /// and is never dropped by <c>--recreate</c>.
     /// </summary>
-    public string ScanTableName { get; set; } = "dbo.Scans";
+    public string ScanTableName { get; set; } = "Scans";
 
     /// <summary>When true, file contents are hashed (SHA-256). Disable for a fast metadata-only inventory.</summary>
     public bool ComputeHash { get; set; } = true;
@@ -121,8 +127,9 @@ public sealed partial class Options
                     break;
 
                 case "-c":
-                case "--connection-string":
-                    o.ConnectionString = Next(arg);
+                case "--db":
+                case "--database":
+                    o.DatabasePath = Next(arg);
                     break;
 
                 case "-t":

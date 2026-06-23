@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
 
 namespace HarddriveDeduper;
 
@@ -72,8 +72,7 @@ public sealed class DuplicateAnalyzer
     public async Task<DuplicateAnalysis> FindTopDuplicatesAsync(
         int topN, int samplePathsPerGroup, CancellationToken ct)
     {
-        await using var conn = new SqlConnection(_options.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
 
         List<ScanRef> scans = await GetLatestCompletedScansAsync(conn, ct);
         if (scans.Count == 0)
@@ -108,8 +107,7 @@ public sealed class DuplicateAnalyzer
     /// </summary>
     public async Task<DuplicateAnalysis> FindDuplicatesOverThresholdAsync(long minWastedBytes, CancellationToken ct)
     {
-        await using var conn = new SqlConnection(_options.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
 
         List<ScanRef> scans = await GetLatestCompletedScansAsync(conn, ct);
         if (scans.Count == 0)
@@ -134,8 +132,12 @@ public sealed class DuplicateAnalyzer
     /// if none exist. When <c>--drives</c> is given, only those drives are considered. Only completed
     /// runs are eligible — partial data from a canceled, failed, or never-finished scan is never analyzed.
     /// </summary>
-    private async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqlConnection conn, CancellationToken ct)
+    private async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqliteConnection conn, CancellationToken ct)
     {
+        // Guard against the log table not existing (fresh database / analyze-only on an unscanned file).
+        if (!await TableExistsAsync(conn, _options.ScanTableName, ct))
+            return new List<ScanRef>();
+
         await using var cmd = conn.CreateCommand();
 
         // Optionally restrict to the drives the user named on the command line.
@@ -152,20 +154,17 @@ public sealed class DuplicateAnalyzer
         }
 
         // One row per drive — the newest completed run (ROW_NUMBER breaks any same-timestamp tie so a
-        // drive never contributes two runs, which would double-count files). Guard against the log table
-        // not existing (older databases / analyze-only runs).
+        // drive never contributes two runs, which would double-count files).
         cmd.CommandText = $@"
-IF OBJECT_ID('{_options.ScanTableName}', 'U') IS NOT NULL
-    SELECT Drive, ScanRunId, CompletedAtUtc
-    FROM (
-        SELECT Drive, ScanRunId, CompletedAtUtc,
-               ROW_NUMBER() OVER (PARTITION BY Drive ORDER BY CompletedAtUtc DESC, ScanRunId) AS rn
-        FROM {_options.ScanTableName}
-        WHERE Status = 'Completed' AND Drive IS NOT NULL{driveFilter}
-    ) ranked
-    WHERE rn = 1
-    ORDER BY Drive;";
-        cmd.CommandTimeout = 0;
+SELECT Drive, ScanRunId, CompletedAtUtc
+FROM (
+    SELECT Drive, ScanRunId, CompletedAtUtc,
+           ROW_NUMBER() OVER (PARTITION BY Drive ORDER BY CompletedAtUtc DESC, ScanRunId) AS rn
+    FROM {_options.ScanTableName}
+    WHERE Status = 'Completed' AND Drive IS NOT NULL{driveFilter}
+) ranked
+WHERE rn = 1
+ORDER BY Drive;";
 
         var scans = new List<ScanRef>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -179,20 +178,19 @@ IF OBJECT_ID('{_options.ScanTableName}', 'U') IS NOT NULL
     /// Sum the reclaimable space over <em>all</em> duplicate sets across the combined runs — every set
     /// of identical content contributes (copies − 1) × size. This is the total before the top-N cut.
     /// </summary>
-    private async Task<long> QueryTotalWastedAsync(SqlConnection conn, IReadOnlyList<string> runIds, CancellationToken ct)
+    private async Task<long> QueryTotalWastedAsync(SqliteConnection conn, IReadOnlyList<string> runIds, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         string inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
 SELECT COALESCE(SUM(WastedBytes), 0)
 FROM (
-    SELECT CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes AS WastedBytes
+    SELECT (COUNT(*) - 1) * SizeBytes AS WastedBytes
     FROM {_options.TableName}
     WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL AND EntryType = 'F'
     GROUP BY ContentHash, SizeBytes
     HAVING COUNT(*) > 1
 ) AS perGroup;";
-        cmd.CommandTimeout = 0;
 
         object? result = await cmd.ExecuteScalarAsync(ct);
         return result is long total ? total : Convert.ToInt64(result);
@@ -204,24 +202,23 @@ FROM (
     /// that (0 = no floor).
     /// </summary>
     private async Task<List<DuplicateGroup>> QueryFileGroupsAsync(
-        SqlConnection conn, IReadOnlyList<string> runIds, int? topN, long minWastedBytes, CancellationToken ct)
+        SqliteConnection conn, IReadOnlyList<string> runIds, int? topN, long minWastedBytes, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         string inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
-SELECT {TopClause(cmd, topN)}
+SELECT
     ContentHash,
     SizeBytes,
-    COUNT(*)                                  AS CopyCount,
-    CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes  AS WastedBytes,
-    MIN(FileName)                             AS SampleName,
-    COUNT(DISTINCT FileName)                  AS DistinctNameCount
+    COUNT(*)                    AS CopyCount,
+    (COUNT(*) - 1) * SizeBytes  AS WastedBytes,
+    MIN(FileName)               AS SampleName,
+    COUNT(DISTINCT FileName)    AS DistinctNameCount
 FROM {_options.TableName}
 WHERE ScanRunId IN ({inClause}) AND ContentHash IS NOT NULL AND EntryType = 'F'
 GROUP BY ContentHash, SizeBytes
-HAVING COUNT(*) > 1 AND CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes >= @minWasted
-ORDER BY WastedBytes DESC;";
-        cmd.CommandTimeout = 0;
+HAVING COUNT(*) > 1 AND (COUNT(*) - 1) * SizeBytes >= @minWasted
+ORDER BY WastedBytes DESC{LimitSuffix(cmd, topN)};";
         cmd.Parameters.AddWithValue("@minWasted", minWastedBytes);
 
         return await ReadGroupsAsync(cmd, ct);
@@ -237,42 +234,50 @@ ORDER BY WastedBytes DESC;";
     /// filters out sets reclaiming less than that (0 = no floor).
     /// </summary>
     private async Task<List<DuplicateGroup>> QueryFolderGroupsAsync(
-        SqlConnection conn, IReadOnlyList<string> runIds, int? topN, long minWastedBytes, CancellationToken ct)
+        SqliteConnection conn, IReadOnlyList<string> runIds, int? topN, long minWastedBytes, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         string inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
 {IndependentFoldersCte(inClause)}
-SELECT {TopClause(cmd, topN)}
+SELECT
     ContentHash,
     SizeBytes,
-    COUNT(*)                                  AS CopyCount,
-    CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes  AS WastedBytes,
-    MIN(FileName)                             AS SampleName,
-    COUNT(DISTINCT FileName)                  AS DistinctNameCount
+    COUNT(*)                    AS CopyCount,
+    (COUNT(*) - 1) * SizeBytes  AS WastedBytes,
+    MIN(FileName)               AS SampleName,
+    COUNT(DISTINCT FileName)    AS DistinctNameCount
 FROM Independent
 GROUP BY ContentHash, SizeBytes
-HAVING COUNT(*) > 1 AND CAST(COUNT(*) - 1 AS BIGINT) * SizeBytes >= @minWasted
-ORDER BY WastedBytes DESC;";
-        cmd.CommandTimeout = 0;
+HAVING COUNT(*) > 1 AND (COUNT(*) - 1) * SizeBytes >= @minWasted
+ORDER BY WastedBytes DESC{LimitSuffix(cmd, topN)};";
         cmd.Parameters.AddWithValue("@minWasted", minWastedBytes);
 
         return await ReadGroupsAsync(cmd, ct);
     }
 
     /// <summary>
-    /// The <c>TOP (@topN) </c> fragment for a ranked query, adding the parameter when capped; an empty
-    /// string (no cap) when <paramref name="topN"/> is null.
+    /// The trailing <c> LIMIT @topN</c> fragment for a ranked query, adding the parameter when capped; an
+    /// empty string (no cap) when <paramref name="topN"/> is null. Appended after <c>ORDER BY</c>.
     /// </summary>
-    private static string TopClause(SqlCommand cmd, int? topN)
+    private static string LimitSuffix(SqliteCommand cmd, int? topN)
     {
         if (topN is null)
             return "";
         cmd.Parameters.AddWithValue("@topN", topN.Value);
-        return "TOP (@topN) ";
+        return " LIMIT @topN";
     }
 
-    private static async Task<List<DuplicateGroup>> ReadGroupsAsync(SqlCommand cmd, CancellationToken ct)
+    /// <summary>True if a table of the given name exists in the database.</summary>
+    private static async Task<bool> TableExistsAsync(SqliteConnection conn, string table, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @t;";
+        cmd.Parameters.AddWithValue("@t", table);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct)) == 1;
+    }
+
+    private static async Task<List<DuplicateGroup>> ReadGroupsAsync(SqliteCommand cmd, CancellationToken ct)
     {
         var groups = new List<DuplicateGroup>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -293,16 +298,15 @@ ORDER BY WastedBytes DESC;";
 
     /// <summary>Locations for a duplicate file set. <paramref name="limit"/> ≤ 0 loads them all.</summary>
     private async Task LoadFileSamplePathsAsync(
-        SqlConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
+        SqliteConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         string inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
-SELECT {LimitClause(cmd, limit)}FullPath
+SELECT FullPath
 FROM {_options.TableName}
 WHERE ScanRunId IN ({inClause}) AND ContentHash = @hash AND SizeBytes = @size AND EntryType = 'F'
-ORDER BY FullPath;";
-        cmd.CommandTimeout = 0;
+ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
         cmd.Parameters.AddWithValue("@hash", g.ContentHash);
         cmd.Parameters.AddWithValue("@size", g.SizeBytes);
 
@@ -314,36 +318,23 @@ ORDER BY FullPath;";
     /// <paramref name="limit"/> ≤ 0 loads them all.
     /// </summary>
     private async Task LoadFolderSamplePathsAsync(
-        SqlConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
+        SqliteConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         string inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
 {IndependentFoldersCte(inClause)}
-SELECT {LimitClause(cmd, limit)}FullPath
+SELECT FullPath
 FROM Independent
 WHERE ContentHash = @hash AND SizeBytes = @size
-ORDER BY FullPath;";
-        cmd.CommandTimeout = 0;
+ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
         cmd.Parameters.AddWithValue("@hash", g.ContentHash);
         cmd.Parameters.AddWithValue("@size", g.SizeBytes);
 
         await ReadSamplePathsAsync(cmd, g, ct);
     }
 
-    /// <summary>
-    /// The <c>TOP (@limit) </c> fragment for a path query, adding the parameter when capped; an empty
-    /// string (load all rows) when <paramref name="limit"/> is ≤ 0.
-    /// </summary>
-    private static string LimitClause(SqlCommand cmd, int limit)
-    {
-        if (limit <= 0)
-            return "";
-        cmd.Parameters.AddWithValue("@limit", limit);
-        return "TOP (@limit) ";
-    }
-
-    private static async Task ReadSamplePathsAsync(SqlCommand cmd, DuplicateGroup g, CancellationToken ct)
+    private static async Task ReadSamplePathsAsync(SqliteCommand cmd, DuplicateGroup g, CancellationToken ct)
     {
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -370,9 +361,9 @@ Independent AS (
         SELECT 1 FROM F a
         WHERE a.ContentHash = f.ContentHash
           AND a.SizeBytes   = f.SizeBytes
-          AND LEN(f.FullPath) > LEN(a.FullPath)
-          AND LEFT(f.FullPath, LEN(a.FullPath)) = a.FullPath
-          AND (RIGHT(a.FullPath, 1) = '\' OR SUBSTRING(f.FullPath, LEN(a.FullPath) + 1, 1) = '\')
+          AND LENGTH(f.FullPath) > LENGTH(a.FullPath)
+          AND SUBSTR(f.FullPath, 1, LENGTH(a.FullPath)) = a.FullPath
+          AND (SUBSTR(a.FullPath, -1, 1) = '\' OR SUBSTR(f.FullPath, LENGTH(a.FullPath) + 1, 1) = '\')
     )
 )";
 
@@ -380,7 +371,7 @@ Independent AS (
     /// Add a <c>@run{i}</c> parameter for each scan id and return the comma-separated parameter list
     /// for use inside a <c>ScanRunId IN (...)</c> clause.
     /// </summary>
-    private static string BuildRunIdInClause(SqlCommand cmd, IReadOnlyList<string> runIds)
+    private static string BuildRunIdInClause(SqliteCommand cmd, IReadOnlyList<string> runIds)
     {
         var names = new string[runIds.Count];
         for (int i = 0; i < runIds.Count; i++)

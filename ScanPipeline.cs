@@ -24,11 +24,13 @@ public sealed class ScanPipeline
 {
     private readonly Options _options;
     private readonly ConsoleReporter _reporter;
+    private readonly SemaphoreSlim _writeLock;
 
-    public ScanPipeline(Options options, ConsoleReporter reporter)
+    public ScanPipeline(Options options, ConsoleReporter reporter, SemaphoreSlim writeLock)
     {
         _options = options;
         _reporter = reporter;
+        _writeLock = writeLock;
     }
 
     /// <summary>
@@ -58,7 +60,7 @@ public sealed class ScanPipeline
                 }
                 else
                 {
-                    var w = new DatabaseWriter(_options);
+                    var w = new DatabaseWriter(_options, _writeLock);
                     await w.OpenConnectionAsync(ct);
                     writers[i] = w;
                     ownedWriters.Add(w);
@@ -173,8 +175,6 @@ public sealed class ScanPipeline
     private async Task ComputeHashesAsync(
         FileScanner scanner, DatabaseWriter writer, MultiProgress.Slot slot, CancellationToken ct)
     {
-        await writer.BeginHashPassAsync(ct);
-
         var parallelOpts = new ParallelOptions
         {
             MaxDegreeOfParallelism = _options.Parallelism,

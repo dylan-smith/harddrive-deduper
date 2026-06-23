@@ -15,7 +15,7 @@ public sealed class ConsoleReporter
     {
         Console.WriteLine($"Scanning {roots.Count} drive(s): {string.Join(", ", roots)}");
         Console.WriteLine($"Hashing: {(_options.ComputeHash ? $"SHA-256 ({_options.Parallelism} threads)" : "disabled")}");
-        Console.WriteLine($"Database: {Redact(_options.ConnectionString)}  ->  {_options.TableName}");
+        Console.WriteLine($"Database: {Path.GetFullPath(_options.DatabasePath)}  ->  {_options.TableName}");
         Console.WriteLine();
     }
 
@@ -147,18 +147,5 @@ public sealed class ConsoleReporter
             unit++;
         }
         return unit == 0 ? $"{bytes} B" : $"{size:0.##} {units[unit]}";
-    }
-
-    /// <summary>Hide any password in the connection string before echoing it to the console.</summary>
-    private static string Redact(string connectionString)
-    {
-        var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries);
-        for (int i = 0; i < parts.Length; i++)
-        {
-            string key = parts[i].Split('=', 2)[0].Trim().ToLowerInvariant();
-            if (key is "password" or "pwd")
-                parts[i] = parts[i].Split('=', 2)[0] + "=***";
-        }
-        return string.Join(';', parts);
     }
 }

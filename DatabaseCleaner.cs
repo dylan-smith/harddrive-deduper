@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
 
 namespace HarddriveDeduper;
 
@@ -41,8 +41,7 @@ public sealed class DatabaseCleaner
     /// </summary>
     public async Task<CleanupPlan> PlanAsync(CancellationToken ct)
     {
-        await using var conn = new SqlConnection(_options.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
 
         if (!await TableExistsAsync(conn, _options.ScanTableName, ct))
             throw new InvalidOperationException(
@@ -71,8 +70,7 @@ public sealed class DatabaseCleaner
     /// </summary>
     public async Task<CleanupResult> ExecuteAsync(CleanupPlan plan, IProgress<long>? progress, CancellationToken ct)
     {
-        await using var conn = new SqlConnection(_options.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
 
         long files = await TableExistsAsync(conn, _options.TableName, ct)
             ? await DeleteNotKeptAsync(conn, _options.TableName, progress, ct)
@@ -89,7 +87,7 @@ public sealed class DatabaseCleaner
     /// <see cref="DuplicateAnalyzer.GetLatestCompletedScansAsync"/> but spans every drive (cleanup is
     /// database-wide), so the keep set here matches the <c>Keep</c> CTE used by the delete statements.
     /// </summary>
-    private async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqlConnection conn, CancellationToken ct)
+    private async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqliteConnection conn, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
@@ -111,12 +109,12 @@ ORDER BY Drive;";
         return scans;
     }
 
-    private async Task<long> CountNotKeptAsync(SqlConnection conn, string table, CancellationToken ct)
+    private async Task<long> CountNotKeptAsync(SqliteConnection conn, string table, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
 {KeepCte()}
-SELECT COUNT_BIG(*)
+SELECT COUNT(*)
 FROM {table} t
 WHERE NOT EXISTS (SELECT 1 FROM Keep k WHERE k.ScanRunId = t.ScanRunId);";
         cmd.CommandTimeout = 0;
@@ -126,13 +124,18 @@ WHERE NOT EXISTS (SELECT 1 FROM Keep k WHERE k.ScanRunId = t.ScanRunId);";
     }
 
     private async Task<long> DeleteNotKeptAsync(
-        SqlConnection conn, string table, IProgress<long>? progress, CancellationToken ct)
+        SqliteConnection conn, string table, IProgress<long>? progress, CancellationToken ct)
     {
+        // SQLite has no DELETE...TOP/LIMIT (its build omits that extension), so delete a batch of Ids
+        // selected by the same NOT-EXISTS predicate; every target table has an Id primary key.
         string sql = $@"
 {KeepCte()}
-DELETE TOP (@batch) t
-FROM {table} t
-WHERE NOT EXISTS (SELECT 1 FROM Keep k WHERE k.ScanRunId = t.ScanRunId);";
+DELETE FROM {table}
+WHERE Id IN (
+    SELECT Id FROM {table} t
+    WHERE NOT EXISTS (SELECT 1 FROM Keep k WHERE k.ScanRunId = t.ScanRunId)
+    LIMIT @batch
+);";
 
         long total = 0;
         while (true)
@@ -169,12 +172,12 @@ WITH Keep AS (
     WHERE rn = 1
 )";
 
-    private static async Task<bool> TableExistsAsync(SqlConnection conn, string table, CancellationToken ct)
+    private static async Task<bool> TableExistsAsync(SqliteConnection conn, string table, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT CASE WHEN OBJECT_ID(@t, 'U') IS NULL THEN 0 ELSE 1 END;";
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @t;";
         cmd.Parameters.AddWithValue("@t", table);
         object? result = await cmd.ExecuteScalarAsync(ct);
-        return Convert.ToInt32(result) == 1;
+        return Convert.ToInt64(result) == 1;
     }
 }

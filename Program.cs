@@ -93,9 +93,14 @@ if (roots.Count == 0)
 var reporter = new ConsoleReporter(options);
 reporter.PrintBanner(roots);
 
+// All drives share one SQLite file, so writes serialize through this single lock while scanning and
+// hashing stay parallel. The primary writer (below) and every per-drive writer the pipeline creates
+// are constructed with this same instance.
+var writeLock = new SemaphoreSlim(1, 1);
+
 // This writer sets up the schema once and is then reused for the first drive; the pipeline creates
 // (and disposes) one additional writer per remaining drive so drives can scan in parallel.
-using var writer = new DatabaseWriter(options);
+using var writer = new DatabaseWriter(options, writeLock);
 
 try
 {
@@ -109,7 +114,7 @@ catch (Exception ex)
 }
 
 var sw = Stopwatch.StartNew();
-(int exitCode, ScanTotals totals) = await new ScanPipeline(options, reporter).RunAsync(roots, writer, cts.Token);
+(int exitCode, ScanTotals totals) = await new ScanPipeline(options, reporter, writeLock).RunAsync(roots, writer, cts.Token);
 sw.Stop();
 
 reporter.PrintSummary(totals, sw.Elapsed);

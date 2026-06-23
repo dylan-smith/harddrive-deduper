@@ -1,8 +1,10 @@
 # harddrive-deduper
 
 A Windows C# CLI that scans every file on every (or selected) hard drive and records each
-file's metadata plus a content fingerprint into a SQL Server database. The content hash makes it
-trivial to find duplicate files: any rows sharing a `ContentHash` are byte-for-byte identical.
+file's metadata plus a content fingerprint into a local **SQLite database file**. The content hash
+makes it trivial to find duplicate files: any rows sharing a `ContentHash` are byte-for-byte
+identical. SQLite is embedded — there is no server to install or run; the whole database is a single
+`.db` file (default `fileindex.db`).
 
 ## What it records
 
@@ -20,12 +22,14 @@ For every file it writes one row containing:
 | `ScanRunId`       | GUID identifying this scan run (one run per drive)   |
 | `ScannedAtUtc`    | When the row was written                             |
 
-The table is created automatically if it doesn't exist, as is the database named in the
-connection string.
+The table is created automatically if it doesn't exist, as is the database file itself
+(SQLite creates the `.db` file on first open). The file is opened in **WAL mode**, so the several
+drives scanned in parallel can read concurrently; their writes are serialized through a single
+process-wide lock so they never collide on the one shared file.
 
 ## Scans and analysis
 
-Each drive is scanned as its own **scan run** with a unique `ScanRunId`, logged to `dbo.Scans`
+Each drive is scanned as its own **scan run** with a unique `ScanRunId`, logged to the `Scans` table
 (start/finish time, status, and which drive). Scanning `C,D` therefore produces two runs.
 
 When analyzing (automatically after a scan, or via `--analyze`), the tool takes the **latest
@@ -67,13 +71,14 @@ duplicateFolderSets: []
 
 After a successful analysis (whether post-scan or a standalone `--analyze`), the tool automatically
 runs a database **cleanup**, pruning everything but the latest completed scan of each drive (the same
-runs analysis just used). Pass `--no-cleanup` to skip it. The `dbo.Scans` audit log is always
+runs analysis just used). Pass `--no-cleanup` to skip it. The `Scans` audit log is always
 preserved, and `--dry-run` previews the cleanup without deleting anything.
 
 ## Requirements
 
 - .NET 10 SDK
-- A reachable SQL Server instance
+
+No database server is required — SQLite is embedded in the executable.
 
 ## Build
 
@@ -92,11 +97,11 @@ fileindexer [options]
 | Option | Description |
 |--------|-------------|
 | `-d, --drives <list>` | Comma-separated drives to scan (`C,D` or `C:\,E:\`). Omit to scan **all fixed drives**. |
-| `-c, --connection-string <s>` | SQL Server connection string. Default: `localhost` / `FileInventory` / integrated auth. |
-| `-t, --table <name>` | Destination table. Default `dbo.Files`. |
+| `-c, --db, --database <path>` | SQLite database file. Created if it doesn't exist. Default: `fileindex.db`. |
+| `-t, --table <name>` | Destination table. Default `Files`. |
 | `--no-hash` | Record metadata only; skip hashing (much faster). |
 | `--max-hash-mb <n>` | Skip hashing files larger than `n` MB (metadata still recorded). |
-| `--batch-size <n>` | Rows per bulk-copy flush. Default 5000. |
+| `--batch-size <n>` | Rows per insert transaction. Default 5000. |
 | `--parallelism <n>` | Hashing threads. Default = processor count. |
 | `--recreate` | Drop and recreate the table before scanning. |
 | `--follow-links` | Follow directory symlinks/junctions (off by default to avoid loops). |
@@ -104,7 +109,7 @@ fileindexer [options]
 
 ### Examples
 
-Scan all fixed drives into the default local database:
+Scan all fixed drives into the default `fileindex.db`:
 
 ```
 fileindexer
@@ -116,10 +121,10 @@ Scan only C: and D::
 fileindexer --drives C,D
 ```
 
-Use a specific server and credentials:
+Use a specific database file location:
 
 ```
-fileindexer -c "Server=.;Database=FileInventory;User Id=sa;Password=***;TrustServerCertificate=true"
+fileindexer --db D:\index\fileindex.db --drives C
 ```
 
 Fast metadata-only inventory of C:, starting fresh:
@@ -130,9 +135,11 @@ fileindexer --drives C --no-hash --recreate
 
 ### Finding duplicates afterward
 
+Open the `.db` file with any SQLite client (e.g. the `sqlite3` CLI):
+
 ```sql
 SELECT ContentHash, COUNT(*) AS Copies, SUM(SizeBytes) AS TotalBytes
-FROM dbo.Files
+FROM Files
 WHERE ContentHash IS NOT NULL
 GROUP BY ContentHash
 HAVING COUNT(*) > 1

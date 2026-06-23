@@ -427,3 +427,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# fileindexer SQLite database (and WAL sidecars) produced by a scan
+fileindex.db
+fileindex.db-wal
+fileindex.db-shm
