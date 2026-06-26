@@ -15,7 +15,9 @@ internal sealed class FileScanner(Options options)
     private readonly Options _options = options;
 
     public long FilesSeen;
+    public long BytesSeen;
     public long FilesHashed;
+    public long BytesHashed;
     public long DirectoriesSkipped;
     public long HashErrors;
 
@@ -74,6 +76,7 @@ internal sealed class FileScanner(Options options)
                 if (record is not null)
                 {
                     Interlocked.Increment(ref FilesSeen);
+                    Interlocked.Add(ref BytesSeen, record.SizeBytes);
                     yield return record;
                 }
             }
@@ -135,6 +138,7 @@ internal sealed class FileScanner(Options options)
             using var sha = SHA256.Create();
             var hash = sha.ComputeHash(stream);
             Interlocked.Increment(ref FilesHashed);
+            Interlocked.Add(ref BytesHashed, pending.SizeBytes);
             return new HashResult(pending.Id, Convert.ToHexStringLower(hash), Error: null);
         }
         catch (Exception ex)

@@ -50,9 +50,16 @@ internal sealed class ConsoleReporter
     /// Render a fixed-width text progress bar like <c>[#########-----------]  45%</c> for a pass whose
     /// total is known up front. A non-positive <paramref name="total"/> renders as complete.
     /// </summary>
-    public static string ProgressBar(long done, long total, int width = 20)
+    public static string ProgressBar(long done, long total, int width = 20) =>
+        ProgressBar(total <= 0 ? 1.0 : (double)done / total, width);
+
+    /// <summary>
+    /// Render a fixed-width text progress bar like <c>[#########-----------]  45%</c> from a completion
+    /// fraction in [0, 1] (clamped). Use this overload when the fraction blends several measures.
+    /// </summary>
+    public static string ProgressBar(double fraction, int width = 20)
     {
-        var fraction = total <= 0 ? 1.0 : Math.Clamp((double)done / total, 0.0, 1.0);
+        fraction = Math.Clamp(fraction, 0.0, 1.0);
         var filled = (int)Math.Round(fraction * width);
         return $"[{new string('#', filled)}{new string('-', width - filled)}] {fraction * 100,3:0}%";
     }
@@ -169,7 +176,7 @@ internal sealed class ConsoleReporter
         Console.Error.WriteLine("\nFatal error during scan: " + message);
 
     /// <summary>Render a byte count as a human-friendly size (e.g. "1.50 GB").</summary>
-    private static string FormatBytes(long bytes)
+    public static string FormatBytes(long bytes)
     {
         string[] units = { "B", "KB", "MB", "GB", "TB", "PB" };
         double size = bytes;
@@ -180,5 +187,26 @@ internal sealed class ConsoleReporter
             unit++;
         }
         return unit == 0 ? $"{bytes} B" : $"{size:0.##} {units[unit]}";
+    }
+
+    /// <summary>
+    /// Render a running byte count against a total, both sharing the single unit most appropriate for
+    /// the total (e.g. "1.2 GB / 7.9 GB"), so the two figures stay directly comparable.
+    /// </summary>
+    public static string FormatBytesPair(long done, long total)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB", "PB" };
+        var unit = 0;
+        double scale = 1;
+        while (total / scale >= 1024 && unit < units.Length - 1)
+        {
+            scale *= 1024;
+            unit++;
+        }
+
+        var u = units[unit];
+        return unit == 0
+            ? $"{done} {u} / {total} {u}"
+            : $"{done / scale:0.#} {u} / {total / scale:0.#} {u}";
     }
 }

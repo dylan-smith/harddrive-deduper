@@ -168,8 +168,8 @@ internal sealed class ScanPipeline
     {
         // Scanner and writer are this drive's alone, so their counters already read as per-drive totals.
         slot.StartEnumerate(() =>
-            $"files: {scanner.FilesSeen:N0}  written: {writer.RowsWritten:N0}  " +
-            $"dirs skipped: {scanner.DirectoriesSkipped:N0}");
+            $"files: {scanner.FilesSeen:N0} ({ConsoleReporter.FormatBytes(scanner.BytesSeen)})  " +
+            $"written: {writer.RowsWritten:N0}  dirs skipped: {scanner.DirectoriesSkipped:N0}");
 
         foreach (var record in scanner.EnumerateFiles(root))
         {
@@ -194,14 +194,24 @@ internal sealed class ScanPipeline
             CancellationToken = ct,
         };
 
-        // Pass one wrote exactly the rows pass two will page through, so its count is the bar's total.
+        // Pass one wrote exactly the rows pass two will page through, so its count is the bar's total,
+        // and its byte tally (fixed now that enumeration is done) is the total bytes to hash against.
         // processed advances by whole chunks; the render timer reads it for the bar as it grows.
         var total = writer.RowsWrittenThisScan;
+        var totalBytes = scanner.BytesSeen;
         long processed = 0;
 
         slot.StartHash(() =>
-            $"{ConsoleReporter.ProgressBar(processed, total)}  " +
-            $"hashed: {scanner.FilesHashed:N0}  hash errors: {scanner.HashErrors:N0}");
+        {
+            // The bar blends how far we are through the files with how far through the bytes, so a chunk
+            // of huge files moves it as much as their size warrants rather than by file count alone.
+            var fileFraction = total <= 0 ? 1.0 : (double)processed / total;
+            var byteFraction = totalBytes <= 0 ? 1.0 : (double)scanner.BytesHashed / totalBytes;
+            return $"{ConsoleReporter.ProgressBar((fileFraction + byteFraction) / 2)}  " +
+                $"hashed: {scanner.FilesHashed:N0} / {total:N0}  " +
+                $"{ConsoleReporter.FormatBytesPair(scanner.BytesHashed, totalBytes)}  " +
+                $"hash errors: {scanner.HashErrors:N0}";
+        });
 
         long afterId = 0;
         while (true)
