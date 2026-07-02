@@ -14,7 +14,7 @@ public sealed class DeleteService : IDeleteService
     {
         try
         {
-            await Task.Run(() =>
+            var deleted = await Task.Run(() =>
             {
                 // The \\?\ form works past MAX_PATH regardless of the LongPathsEnabled policy the
                 // manifest's longPathAware setting depends on.
@@ -22,12 +22,23 @@ public sealed class DeleteService : IDeleteService
                 if (isFolder)
                 {
                     Directory.Delete(path, recursive: true);
+                    return true;
                 }
-                else
+
+                // File.Delete is a silent no-op on a missing file; report that case honestly.
+                if (!File.Exists(path))
                 {
-                    File.Delete(path);
+                    return false;
                 }
+
+                File.Delete(path);
+                return true;
             }, ct);
+
+            if (!deleted)
+            {
+                return new DeleteOutcome(DeleteStatus.AlreadyMissing);
+            }
         }
         catch (DirectoryNotFoundException)
         {
@@ -63,12 +74,9 @@ public sealed class DeleteService : IDeleteService
     /// </summary>
     internal static string ToExtendedLengthPath(string path)
     {
-        if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
-        {
-            return path;
-        }
-
-        return path.StartsWith(@"\\", StringComparison.Ordinal)
+        return path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            ? path
+            : path.StartsWith(@"\\", StringComparison.Ordinal)
             ? string.Concat(@"\\?\UNC\", path.AsSpan(2))
             : @"\\?\" + path;
     }

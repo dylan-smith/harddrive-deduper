@@ -48,6 +48,7 @@ public sealed partial class GroupMemberViewModel : ObservableObject
 
     public string StatusText => State switch
     {
+        MemberState.Present => "",
         MemberState.Deleted => "deleted",
         MemberState.Removed => "was missing — removed from DB",
         MemberState.Failed => ErrorMessage ?? "failed",

@@ -146,7 +146,7 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
             return;
         }
 
-        var reclaim = (long)doomed.Count * SizeBytes;
+        var reclaim = doomed.Count * SizeBytes;
         var message = new StringBuilder();
         message.AppendLine($"Keep:\n{keep.FullPath}");
         message.AppendLine();
@@ -192,7 +192,7 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
         }
         else
         {
-            _dialogs.ShowInfo("Done", $"Deleted {deleted} cop{(deleted == 1 ? "y" : "ies")}, reclaiming {Format.Bytes((long)deleted * SizeBytes)}.");
+            _dialogs.ShowInfo("Done", $"Deleted {deleted} cop{(deleted == 1 ? "y" : "ies")}, reclaiming {Format.Bytes(deleted * SizeBytes)}.");
         }
     }
 
@@ -217,6 +217,7 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
                 member.State = MemberState.Failed;
                 return false;
 
+            case DeleteStatus.Failed:
             default:
                 member.ErrorMessage = outcome.Error ?? "delete failed";
                 member.State = MemberState.Failed;
