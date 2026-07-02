@@ -143,6 +143,76 @@ public sealed class DuplicateAnalyzer
     }
 
     /// <summary>
+    /// Find duplicate file and folder sets like <see cref="FindDuplicatesOverThresholdAsync"/> but
+    /// <em>without</em> loading any locations — each group's <see cref="DuplicateGroup.SamplePaths"/>
+    /// comes back empty. Intended for interactive browsing, where locations are fetched lazily per
+    /// group via <see cref="GetFileGroupLocationsAsync"/> / <see cref="GetFolderGroupLocationsAsync"/>.
+    /// Returns an empty analysis when no completed scans exist.
+    /// </summary>
+    public async Task<DuplicateAnalysis> FindGroupSummariesAsync(
+        long minWastedBytes, int? topN, CancellationToken ct, IStepProgress? progress = null)
+    {
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
+
+        progress?.BeginStep("Selecting the latest completed scan per drive…");
+        var scans = await GetLatestCompletedScansAsync(conn, ct);
+        if (scans.Count == 0)
+        {
+            return new DuplicateAnalysis(scans, 0, Array.Empty<DuplicateGroup>(), Array.Empty<DuplicateGroup>());
+        }
+
+        var runIds = scans.Select(s => s.ScanRunId).ToList();
+
+        progress?.BeginStep("Tallying total wasted space…");
+        var totalWasted = await QueryTotalWastedAsync(conn, runIds, ct);
+
+        progress?.BeginStep("Finding duplicate files…");
+        var groups = await QueryFileGroupsAsync(conn, runIds, topN, minWastedBytes, ct);
+
+        progress?.BeginStep("Finding duplicate folders…");
+        var folderGroups = await QueryFolderGroupsAsync(conn, runIds, topN, minWastedBytes, ct);
+
+        return new DuplicateAnalysis(scans, totalWasted, groups, folderGroups);
+    }
+
+    /// <summary>
+    /// Every location of one duplicate <em>file</em> set, sorted by path. Complements
+    /// <see cref="FindGroupSummariesAsync"/>, which returns groups without locations.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetFileGroupLocationsAsync(
+        string contentHash, long sizeBytes, CancellationToken ct)
+    {
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
+        var scans = await GetLatestCompletedScansAsync(conn, ct);
+        if (scans.Count == 0)
+        {
+            return [];
+        }
+
+        var runIds = scans.Select(s => s.ScanRunId).ToList();
+        return await QueryFilePathsAsync(conn, runIds, contentHash, sizeBytes, limit: 0, ct);
+    }
+
+    /// <summary>
+    /// Every location of one duplicate <em>folder</em> set — the pruned (topmost) copies only, matching
+    /// what the folder-group queries report — sorted by path. Complements
+    /// <see cref="FindGroupSummariesAsync"/>, which returns groups without locations.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetFolderGroupLocationsAsync(
+        string contentHash, long sizeBytes, CancellationToken ct)
+    {
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
+        var scans = await GetLatestCompletedScansAsync(conn, ct);
+        if (scans.Count == 0)
+        {
+            return [];
+        }
+
+        var runIds = scans.Select(s => s.ScanRunId).ToList();
+        return await QueryFolderPathsAsync(conn, runIds, contentHash, sizeBytes, limit: 0, ct);
+    }
+
+    /// <summary>
     /// Load the locations for every file and folder set, reporting a running count as it goes (this can
     /// dominate the analysis when the uncapped report has many sets, each with all of its copies loaded).
     /// <paramref name="limit"/> ≤ 0 loads them all; otherwise at most that many per set.
@@ -178,7 +248,7 @@ public sealed class DuplicateAnalyzer
     /// if none exist. When <c>--drives</c> is given, only those drives are considered. Only completed
     /// runs are eligible — partial data from a canceled, failed, or never-finished scan is never analyzed.
     /// </summary>
-    private async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqliteConnection conn, CancellationToken ct)
+    internal async Task<List<ScanRef>> GetLatestCompletedScansAsync(SqliteConnection conn, CancellationToken ct)
     {
         // Guard against the log table not existing (fresh database / analyze-only on an unscanned file).
         if (!await TableExistsAsync(conn, _options.ScanTableName, ct))
@@ -361,17 +431,10 @@ ORDER BY WastedBytes DESC{LimitSuffix(cmd, topN)};";
     private async Task LoadFileSamplePathsAsync(
         SqliteConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
     {
-        await using var cmd = conn.CreateCommand();
-        var inClause = BuildRunIdInClause(cmd, runIds);
-        cmd.CommandText = $@"
-SELECT FullPath
-FROM {_options.TableName}
-WHERE ScanRunId IN ({inClause}) AND ContentHash = @hash AND SizeBytes = @size AND EntryType = 'F'
-ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
-        cmd.Parameters.AddWithValue("@hash", g.ContentHash);
-        cmd.Parameters.AddWithValue("@size", g.SizeBytes);
-
-        await ReadSamplePathsAsync(cmd, g, ct);
+        foreach (var path in await QueryFilePathsAsync(conn, runIds, g.ContentHash, g.SizeBytes, limit, ct))
+        {
+            g.SamplePaths.Add(path);
+        }
     }
 
     /// <summary>
@@ -381,6 +444,38 @@ ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
     private async Task LoadFolderSamplePathsAsync(
         SqliteConnection conn, IReadOnlyList<string> runIds, DuplicateGroup g, int limit, CancellationToken ct)
     {
+        foreach (var path in await QueryFolderPathsAsync(conn, runIds, g.ContentHash, g.SizeBytes, limit, ct))
+        {
+            g.SamplePaths.Add(path);
+        }
+    }
+
+    /// <summary>The sorted locations of one duplicate file set. <paramref name="limit"/> ≤ 0 loads them all.</summary>
+    private async Task<List<string>> QueryFilePathsAsync(
+        SqliteConnection conn, IReadOnlyList<string> runIds, string contentHash, long sizeBytes,
+        int limit, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        var inClause = BuildRunIdInClause(cmd, runIds);
+        cmd.CommandText = $@"
+SELECT FullPath
+FROM {_options.TableName}
+WHERE ScanRunId IN ({inClause}) AND ContentHash = @hash AND SizeBytes = @size AND EntryType = 'F'
+ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
+        cmd.Parameters.AddWithValue("@hash", contentHash);
+        cmd.Parameters.AddWithValue("@size", sizeBytes);
+
+        return await ReadPathsAsync(cmd, ct);
+    }
+
+    /// <summary>
+    /// The sorted locations of one duplicate folder set — pruned (topmost) copies only.
+    /// <paramref name="limit"/> ≤ 0 loads them all.
+    /// </summary>
+    private async Task<List<string>> QueryFolderPathsAsync(
+        SqliteConnection conn, IReadOnlyList<string> runIds, string contentHash, long sizeBytes,
+        int limit, CancellationToken ct)
+    {
         await using var cmd = conn.CreateCommand();
         var inClause = BuildRunIdInClause(cmd, runIds);
         cmd.CommandText = $@"
@@ -389,19 +484,21 @@ SELECT FullPath
 FROM Independent
 WHERE ContentHash = @hash AND SizeBytes = @size
 ORDER BY FullPath{LimitSuffix(cmd, limit > 0 ? limit : null)};";
-        cmd.Parameters.AddWithValue("@hash", g.ContentHash);
-        cmd.Parameters.AddWithValue("@size", g.SizeBytes);
+        cmd.Parameters.AddWithValue("@hash", contentHash);
+        cmd.Parameters.AddWithValue("@size", sizeBytes);
 
-        await ReadSamplePathsAsync(cmd, g, ct);
+        return await ReadPathsAsync(cmd, ct);
     }
 
-    private static async Task ReadSamplePathsAsync(SqliteCommand cmd, DuplicateGroup g, CancellationToken ct)
+    private static async Task<List<string>> ReadPathsAsync(SqliteCommand cmd, CancellationToken ct)
     {
+        var paths = new List<string>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            g.SamplePaths.Add(reader.GetString(0));
+            paths.Add(reader.GetString(0));
         }
+        return paths;
     }
 
     /// <summary>
