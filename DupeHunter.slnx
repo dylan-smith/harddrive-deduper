@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="DupeHunter.csproj" />
+  <Project Path="DupeHunter.Core/DupeHunter.Core.csproj" />
 </Solution>

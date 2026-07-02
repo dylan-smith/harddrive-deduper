@@ -6,7 +6,7 @@ internal static class DriveResolver
     /// <summary>
     /// The drives named on the command line, or — when none were given — every ready fixed drive.
     /// </summary>
-    public static List<string> ResolveRoots(Options options)
+    public static IReadOnlyList<string> ResolveRoots(Options options)
     {
         return options.Drives.Count > 0
             ? options.Drives

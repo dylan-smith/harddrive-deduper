@@ -12,9 +12,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
-    <!-- Override the vulnerable native SQLite library pulled in transitively (advisory GHSA-2m69-gcr7-jv3q). -->
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <ProjectReference Include="DupeHunter.Core\DupeHunter.Core.csproj" />
+  </ItemGroup>
+
+  <!-- This project globs *.cs from the repo root; keep the sibling projects out of it. -->
+  <ItemGroup>
+    <Compile Remove="DupeHunter.Core\**;DupeHunter.Gui\**" />
+    <None Remove="DupeHunter.Core\**;DupeHunter.Gui\**" />
   </ItemGroup>
 
 </Project>

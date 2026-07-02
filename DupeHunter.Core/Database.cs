@@ -8,7 +8,7 @@ namespace DupeHunter;
 /// while one writer commits, and writes are additionally serialized at the app level (see the shared
 /// write lock in <see cref="DatabaseWriter"/>) so concurrent writers never collide.
 /// </summary>
-internal static class Database
+public static class Database
 {
     /// <summary>How long a blocked statement waits for a lock before failing — a safety net behind the
     /// app-level write lock (e.g. a read briefly contending with the WAL checkpoint).</summary>

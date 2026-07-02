@@ -1,13 +1,14 @@
+using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Data.Sqlite;
 
 namespace DupeHunter;
 
 /// <summary>Parsed command-line options. Help text lives in <c>Options.HelpText.cs</c>.</summary>
-internal sealed partial class Options
+public sealed partial class Options
 {
     /// <summary>Drive roots to scan, e.g. "C:\", "D:\". Empty means "all fixed drives".</summary>
-    public List<string> Drives { get; } = [];
+    public Collection<string> Drives { get; } = [];
 
     /// <summary>Path of the SQLite database file. Created automatically if it doesn't exist.</summary>
     public string DatabasePath { get; set; } = "dupehunter.db";
@@ -104,6 +105,11 @@ internal sealed partial class Options
         Justification = "Option tokens are matched against lowercase ASCII flag names; lowercasing (not uppercasing) is what makes the comparison correct here.")]
     public static Options Parse(string[] args)
     {
+        if (args is null)
+        {
+            throw new ArgumentNullException(nameof(args));
+        }
+
         var o = new Options();
 
         for (var i = 0; i < args.Length; i++)

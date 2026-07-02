@@ -6,13 +6,13 @@ namespace DupeHunter;
 /// What a cleanup will remove. The retained runs are the most recent <em>completed</em> scan of each
 /// drive (exactly the set <see cref="DuplicateAnalyzer"/> would analyze); everything else is droppable.
 /// </summary>
-internal sealed record CleanupPlan(
+public sealed record CleanupPlan(
     IReadOnlyList<ScanRef> KeptScans,
     long FilesToDelete,
     long SkipsToDelete);
 
 /// <summary>What a cleanup actually removed.</summary>
-internal sealed record CleanupResult(long FilesDeleted, long SkipsDeleted);
+public sealed record CleanupResult(long FilesDeleted, long SkipsDeleted);
 
 /// <summary>
 /// Trims the file inventory down to the data worth keeping, so the database doesn't grow without bound
@@ -27,7 +27,7 @@ internal sealed record CleanupResult(long FilesDeleted, long SkipsDeleted);
 /// (completed or otherwise). It considers every drive in the log regardless of <c>--drives</c>, so it
 /// never deletes a drive's retained run just because that drive wasn't named on the command line.
 /// </remarks>
-internal sealed class DatabaseCleaner
+public sealed class DatabaseCleaner
 {
     private readonly Options _options;
 

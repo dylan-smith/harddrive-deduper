@@ -1,9 +1,10 @@
+using System.Collections.ObjectModel;
 using Microsoft.Data.Sqlite;
 
 namespace DupeHunter;
 
 /// <summary>A set of identical files — same content hash and size — found at two or more locations.</summary>
-internal sealed class DuplicateGroup
+public sealed class DuplicateGroup
 {
     public required string ContentHash { get; init; }
     public required long SizeBytes { get; init; }
@@ -21,11 +22,11 @@ internal sealed class DuplicateGroup
     public required long WastedBytes { get; init; }
 
     /// <summary>A handful of the locations, for display. May be fewer than <see cref="CopyCount"/>.</summary>
-    public List<string> SamplePaths { get; } = [];
+    public Collection<string> SamplePaths { get; } = [];
 }
 
 /// <summary>One drive's scan run that fed an analysis: its drive root, scan id and completion time.</summary>
-internal sealed record ScanRef(string Drive, string ScanRunId, DateTime CompletedAtUtc);
+public sealed record ScanRef(string Drive, string ScanRunId, DateTime CompletedAtUtc);
 
 /// <summary>
 /// The outcome of a duplicate analysis: the duplicate sets plus the per-drive scan runs they were
@@ -46,7 +47,7 @@ internal sealed record ScanRef(string Drive, string ScanRunId, DateTime Complete
 /// (the same redundant files, viewed at folder granularity); they let a whole redundant tree be reclaimed
 /// at once rather than file by file.
 /// </param>
-internal sealed record DuplicateAnalysis(
+public sealed record DuplicateAnalysis(
     IReadOnlyList<ScanRef> Scans,
     long TotalWastedBytes,
     IReadOnlyList<DuplicateGroup> Groups,
@@ -61,7 +62,7 @@ internal sealed record DuplicateAnalysis(
 /// data from a scan that never finished is never analyzed. Files are considered identical when their
 /// content hash and size both match; rows without a hash are ignored.
 /// </summary>
-internal sealed class DuplicateAnalyzer
+public sealed class DuplicateAnalyzer
 {
     private readonly Options _options;
 

@@ -2,7 +2,7 @@ using System.Text;
 
 namespace DupeHunter;
 
-internal sealed partial class Options
+public sealed partial class Options
 {
     public static string HelpText()
     {
