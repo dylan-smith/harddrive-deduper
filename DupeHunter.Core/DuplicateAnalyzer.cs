@@ -176,6 +176,30 @@ public sealed class DuplicateAnalyzer
     }
 
     /// <summary>
+    /// Like <see cref="FindGroupSummariesAsync"/> but for duplicate <em>files</em> only —
+    /// <see cref="DuplicateAnalysis.FolderGroups"/> comes back empty and the expensive folder
+    /// containment analysis is skipped entirely. Used to cheaply re-sync the file view after a
+    /// folder tree is deleted (which removes file rows too).
+    /// </summary>
+    public async Task<DuplicateAnalysis> FindFileGroupSummariesAsync(
+        long minWastedBytes, int? topN, CancellationToken ct)
+    {
+        await using var conn = await Database.OpenConnectionAsync(_options, ct);
+
+        var scans = await GetLatestCompletedScansAsync(conn, ct);
+        if (scans.Count == 0)
+        {
+            return new DuplicateAnalysis(scans, 0, Array.Empty<DuplicateGroup>(), Array.Empty<DuplicateGroup>());
+        }
+
+        var runIds = scans.Select(s => s.ScanRunId).ToList();
+        var totalWasted = await QueryTotalWastedAsync(conn, runIds, ct);
+        var groups = await QueryFileGroupsAsync(conn, runIds, topN, minWastedBytes, ct);
+
+        return new DuplicateAnalysis(scans, totalWasted, groups, Array.Empty<DuplicateGroup>());
+    }
+
+    /// <summary>
     /// Every location of one duplicate <em>file</em> set, sorted by path. Complements
     /// <see cref="FindGroupSummariesAsync"/>, which returns groups without locations.
     /// </summary>

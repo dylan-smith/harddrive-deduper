@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>dupehunter-gui</AssemblyName>
+    <RootNamespace>DupeHunter.Gui</RootNamespace>
+    <!-- app.manifest opts in to long path (>260 char) support on Windows 10 1607+ -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <ProjectReference Include="..\DupeHunter.Core\DupeHunter.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,119 @@
+<UserControl x:Class="DupeHunter.Gui.Views.GroupsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:DupeHunter.Gui.Views"
+             xmlns:vm="clr-namespace:DupeHunter.Gui.ViewModels">
+    <UserControl.Resources>
+        <views:BytesToHumanConverter x:Key="Bytes" />
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" MinHeight="120" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="240" MinHeight="100" />
+        </Grid.RowDefinitions>
+
+        <DataGrid x:Name="GroupsGrid"
+                  Grid.Row="0"
+                  ItemsSource="{Binding Groups, RelativeSource={RelativeSource AncestorType=views:GroupsView}}"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  SelectionMode="Single"
+                  GridLinesVisibility="Horizontal"
+                  HeadersVisibility="Column"
+                  EnableRowVirtualization="True"
+                  VirtualizingPanel.VirtualizationMode="Recycling"
+                  VirtualizingPanel.ScrollUnit="Item"
+                  SelectionChanged="GroupsGrid_SelectionChanged">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*" />
+                <DataGridTextColumn Header="Size" Binding="{Binding SizeBytes, Converter={StaticResource Bytes}}" Width="90" />
+                <DataGridTextColumn Header="Copies" Binding="{Binding RemainingCopies}" Width="70" />
+                <DataGridTextColumn Header="Wasted" Binding="{Binding WastedBytes, Converter={StaticResource Bytes}}" Width="90" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch" Background="#DDD" />
+
+        <Grid Grid.Row="2" DataContext="{Binding SelectedItem, ElementName=GroupsGrid}">
+            <TextBlock Text="Select a duplicate set above to see its locations."
+                       Margin="10" Foreground="Gray">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
+
+            <DockPanel>
+                <DockPanel.Style>
+                    <Style TargetType="DockPanel">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DockPanel.Style>
+
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="10,8,10,4">
+                    <TextBlock FontWeight="Bold" Text="{Binding DisplayName}" />
+                    <TextBlock Margin="12,0,0,0">
+                        <Run Text="{Binding RemainingCopies, Mode=OneWay}" /><Run Text=" of " /><Run Text="{Binding OriginalCopyCount, Mode=OneWay}" /><Run Text=" copies remain — keep one, delete the rest." />
+                    </TextBlock>
+                    <TextBlock Margin="12,0,0,0" Foreground="Gray" Text="loading locations…"
+                               Visibility="{Binding IsLoadingMembers, Converter={StaticResource BoolToVis}}" />
+                </StackPanel>
+
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding Members}" Margin="10,0,10,8">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:GroupMemberViewModel}">
+                                <DockPanel Margin="0,2">
+                                    <Button DockPanel.Dock="Left" Content="Delete" Width="60" Margin="0,0,6,0"
+                                            Command="{Binding DeleteCommand}" />
+                                    <Button DockPanel.Dock="Left" Content="Keep this, delete rest" Width="140" Margin="0,0,6,0"
+                                            Command="{Binding KeepThisCommand}" />
+                                    <Button DockPanel.Dock="Left" Content="Explorer" Width="70" Margin="0,0,10,0"
+                                            Command="{Binding OpenInExplorerCommand}" />
+                                    <TextBlock DockPanel.Dock="Right" Margin="10,0,0,0" VerticalAlignment="Center"
+                                               Text="{Binding StatusText}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="Gray" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsError}" Value="True">
+                                                        <Setter Property="Foreground" Value="DarkRed" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBox Text="{Binding FullPath, Mode=OneWay}" IsReadOnly="True"
+                                             BorderThickness="0" Background="Transparent"
+                                             VerticalAlignment="Center" TextWrapping="NoWrap">
+                                        <TextBox.Style>
+                                            <Style TargetType="TextBox">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsGone}" Value="True">
+                                                        <Setter Property="Foreground" Value="LightGray" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBox.Style>
+                                    </TextBox>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </DockPanel>
+        </Grid>
+    </Grid>
+</UserControl>
