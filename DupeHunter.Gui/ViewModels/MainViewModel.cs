@@ -9,14 +9,15 @@ using DupeHunter.Gui.Services;
 namespace DupeHunter.Gui.ViewModels;
 
 /// <summary>
-/// The main window: which database is open, the duplicate file/folder group lists, and the
-/// refresh/search/filter plumbing around them.
+/// The main window: which YAML duplicate report is open, the duplicate file/folder group lists built
+/// from it, and the refresh/search/filter plumbing around them. All state comes from the report file
+/// the CLI wrote — the scan database is never opened.
 /// </summary>
 public sealed partial class MainViewModel : ObservableObject
 {
     private readonly IDialogService _dialogs;
     private readonly SettingsService _settings;
-    private DbSession? _session;
+    private ReportSession? _session;
 
     public MainViewModel(IDialogService dialogs, SettingsService settings)
     {
@@ -25,7 +26,7 @@ public sealed partial class MainViewModel : ObservableObject
         _settings = settings;
 
         var saved = settings.Load();
-        databasePath = saved.LastDatabasePath ?? "";
+        reportPath = saved.LastReportPath ?? "";
         minWastedMb = saved.MinWastedMb;
 
         FileGroupsView = CollectionViewSource.GetDefaultView(FileGroups);
@@ -36,7 +37,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(RefreshCommand))]
-    private string databasePath;
+    private string reportPath;
 
     [ObservableProperty]
     private double minWastedMb;
@@ -52,7 +53,7 @@ public sealed partial class MainViewModel : ObservableObject
     public bool IsNotBusy => !IsBusy;
 
     [ObservableProperty]
-    private string statusText = "Open a DupeHunter database to begin.";
+    private string statusText = "Open a dupehunter duplicates report (.yml) to begin.";
 
     [ObservableProperty]
     private string scanSummary = "";
@@ -79,63 +80,55 @@ public sealed partial class MainViewModel : ObservableObject
         || (item is DuplicateGroupViewModel g && g.Name.Contains(SearchText, StringComparison.OrdinalIgnoreCase));
 
     [RelayCommand]
-    private async Task OpenDatabaseAsync()
+    private async Task OpenReportAsync()
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "Open DupeHunter database",
-            Filter = "SQLite database (*.db)|*.db|All files (*.*)|*.*",
-            FileName = DatabasePath,
+            Title = "Open duplicate report",
+            Filter = "Duplicate report (*.yml;*.yaml)|*.yml;*.yaml|All files (*.*)|*.*",
+            FileName = ReportPath,
         };
         if (dialog.ShowDialog() == true)
         {
-            DatabasePath = dialog.FileName;
+            ReportPath = dialog.FileName;
             await RefreshAsync();
         }
     }
 
-    private bool CanRefresh() => !IsBusy && !string.IsNullOrWhiteSpace(DatabasePath);
+    private bool CanRefresh() => !IsBusy && !string.IsNullOrWhiteSpace(ReportPath);
 
     [RelayCommand(CanExecute = nameof(CanRefresh))]
     private async Task RefreshAsync()
     {
-        // Guard with File.Exists: opening a bad path would silently create an empty database file.
-        if (!File.Exists(DatabasePath))
+        if (!File.Exists(ReportPath))
         {
-            _dialogs.ShowError("Database not found", $"No file at:\n{DatabasePath}\n\nRun the dupehunter CLI scan first, or pick its .db file.");
+            _dialogs.ShowError("Report not found",
+                $"No file at:\n{ReportPath}\n\nRun the dupehunter CLI first — it writes a duplicates-<timestamp>.yml report — then open that file.");
             return;
         }
 
         IsBusy = true;
         try
         {
-            var session = new DbSession(DatabasePath);
-            var minBytes = (long)(MinWastedMb * 1024 * 1024);
-            var progress = new Progress<string>(s => StatusText = s);
-            var stepAdapter = new ProgressStepAdapter(progress);
-
-            var analysis = await Task.Run(async () =>
-            {
-                await session.Mutator.EnsurePathIndexAsync(CancellationToken.None, stepAdapter);
-                return await session.Analyzer.FindGroupSummariesAsync(minBytes, topN: null, CancellationToken.None, stepAdapter);
-            });
+            StatusText = "Loading report…";
+            var session = await Task.Run(() => ReportSession.LoadAsync(ReportPath, CancellationToken.None));
 
             _session = session;
-            Populate(FileGroups, analysis.Groups, isFolder: false);
-            Populate(FolderGroups, analysis.FolderGroups, isFolder: true);
+            Populate(FileGroups, session.Report.FileSets, isFolder: false);
+            Populate(FolderGroups, session.Report.FolderSets, isFolder: true);
 
-            ScanSummary = analysis.Scans.Count == 0
-                ? "No completed scans in this database."
-                : "Scans: " + string.Join("   ", analysis.Scans.Select(s => $"{s.Drive} {s.CompletedAtUtc.ToLocalTime():g}"));
-            TotalWastedText = $"Total reclaimable: {Format.Bytes(analysis.TotalWastedBytes)}";
+            ScanSummary = session.Report.Scans.Count == 0
+                ? "No scans recorded in this report."
+                : "Scans: " + string.Join("   ", session.Report.Scans.Select(s => $"{s.Drive} {s.CompletedAtUtc.ToLocalTime():g}"));
+            TotalWastedText = $"Total reclaimable: {Format.Bytes(session.Report.TotalWastedBytes)}";
             StatusText = $"{FileGroups.Count} duplicate file sets, {FolderGroups.Count} duplicate folder sets over {MinWastedMb:0.#} MB wasted.";
 
-            _settings.Save(new AppSettings { LastDatabasePath = DatabasePath, MinWastedMb = MinWastedMb });
+            _settings.Save(new AppSettings { LastReportPath = ReportPath, MinWastedMb = MinWastedMb });
         }
-        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException or IOException)
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
         {
-            _dialogs.ShowError("Analysis failed", ex.Message);
-            StatusText = "Analysis failed.";
+            _dialogs.ShowError("Couldn't load the report", ex.Message);
+            StatusText = "Load failed.";
         }
         finally
         {
@@ -143,12 +136,17 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private void Populate(ObservableCollection<DuplicateGroupViewModel> target, IReadOnlyList<DuplicateGroup> groups, bool isFolder)
+    /// <summary>
+    /// Fill a list from the report's sets, hiding those below the min-wasted view filter (the report
+    /// itself keeps them — the filter only affects what's shown).
+    /// </summary>
+    private void Populate(ObservableCollection<DuplicateGroupViewModel> target, IEnumerable<DuplicateReportSet> sets, bool isFolder)
     {
+        var minBytes = (long)(MinWastedMb * 1024 * 1024);
         target.Clear();
-        foreach (var group in groups)
+        foreach (var set in sets.Where(s => s.WastedBytes >= minBytes))
         {
-            target.Add(new DuplicateGroupViewModel(group, isFolder, _session!, _dialogs, RemoveResolvedGroup, RefreshFileGroupsAsync));
+            target.Add(new DuplicateGroupViewModel(set, isFolder, _session!, _dialogs, RemoveResolvedGroup, RefreshFileGroupsAsync));
         }
     }
 
@@ -161,37 +159,20 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Re-query just the file groups after a folder tree was deleted (its files were group members
-    /// too). Cheap — the folder containment analysis is not re-run, and folder-set state is kept.
+    /// Rebuild just the file groups after a folder tree was deleted (its files were group members
+    /// too, and the report cascade stripped them). Cheap — it re-reads the in-memory report, and
+    /// folder-set state is kept.
     /// </summary>
-    private async Task RefreshFileGroupsAsync()
+    private Task RefreshFileGroupsAsync()
     {
         if (_session is null)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        try
-        {
-            var minBytes = (long)(MinWastedMb * 1024 * 1024);
-            var analysis = await Task.Run(() =>
-                _session.Analyzer.FindFileGroupSummariesAsync(minBytes, topN: null, CancellationToken.None));
-
-            Populate(FileGroups, analysis.Groups, isFolder: false);
-            TotalWastedText = $"Total reclaimable: {Format.Bytes(analysis.TotalWastedBytes)}";
-            StatusText = $"{FileGroups.Count} duplicate file sets, {FolderGroups.Count} duplicate folder sets (file view refreshed after folder delete).";
-        }
-        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException or IOException)
-        {
-            StatusText = $"File view refresh failed: {ex.Message}";
-        }
-    }
-
-    /// <summary>Routes the analyzer's step labels onto the UI thread as status-bar text.</summary>
-    private sealed class ProgressStepAdapter(IProgress<string> progress) : IStepProgress
-    {
-        public void BeginStep(string label) => progress.Report(label);
-
-        public void UpdateStep(string label) => progress.Report(label);
+        Populate(FileGroups, _session.Report.FileSets, isFolder: false);
+        TotalWastedText = $"Total reclaimable: {Format.Bytes(_session.Report.TotalWastedBytes)}";
+        StatusText = $"{FileGroups.Count} duplicate file sets, {FolderGroups.Count} duplicate folder sets (file view refreshed after folder delete).";
+        return Task.CompletedTask;
     }
 }

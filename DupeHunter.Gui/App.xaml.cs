@@ -20,16 +20,22 @@ public partial class App : Application
 
         var viewModel = new MainViewModel(new DialogService(), new SettingsService());
 
-        // First run (no saved path): offer the CLI's default database if it's sitting next to us.
-        if (string.IsNullOrWhiteSpace(viewModel.DatabasePath) && File.Exists("dupehunter.db"))
+        // First run (no saved path): offer the newest CLI report if one is sitting next to us.
+        if (string.IsNullOrWhiteSpace(viewModel.ReportPath))
         {
-            viewModel.DatabasePath = Path.GetFullPath("dupehunter.db");
+            var newest = Directory.EnumerateFiles(Environment.CurrentDirectory, "duplicates-*.yml")
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+            if (newest is not null)
+            {
+                viewModel.ReportPath = Path.GetFullPath(newest);
+            }
         }
 
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
 
-        if (viewModel.RefreshCommand.CanExecute(null) && File.Exists(viewModel.DatabasePath))
+        if (viewModel.RefreshCommand.CanExecute(null) && File.Exists(viewModel.ReportPath))
         {
             viewModel.RefreshCommand.Execute(null);
         }

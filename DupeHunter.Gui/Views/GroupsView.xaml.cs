@@ -22,12 +22,12 @@ public partial class GroupsView : UserControl
         set => SetValue(GroupsProperty, value);
     }
 
-    private async void GroupsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void GroupsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (GroupsGrid.SelectedItem is DuplicateGroupViewModel group)
         {
-            // Lazily fetch the group's full member list the first time it's opened.
-            await group.EnsureMembersLoadedAsync();
+            // Lazily materialize the group's member rows the first time it's opened.
+            group.EnsureMembersLoaded();
         }
     }
 }

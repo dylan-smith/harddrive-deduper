@@ -7,87 +7,71 @@ using DupeHunter.Gui.Services;
 namespace DupeHunter.Gui.ViewModels;
 
 /// <summary>
-/// One duplicate set (file or folder) in the list: its summary columns, its lazily loaded member
-/// locations, and the delete orchestration those members trigger. When deletions bring the set
-/// down to a single remaining copy it is no longer a duplicate and removes itself from the list.
+/// One duplicate set (file or folder) in the list: its summary columns, its member locations from
+/// the report, and the delete orchestration those members trigger. Counts read live from the backing
+/// report set, which shrinks as copies are deleted; when deletions bring the set down to a single
+/// remaining copy it is no longer a duplicate and removes itself from the list (and the report).
 /// </summary>
 public sealed partial class DuplicateGroupViewModel : ObservableObject
 {
-    private readonly DuplicateGroup _group;
-    private readonly DbSession _session;
+    private readonly DuplicateReportSet _set;
+    private readonly ReportSession _session;
     private readonly IDialogService _dialogs;
     private readonly Action<DuplicateGroupViewModel> _onResolved;
     private readonly Func<Task> _onFolderDeleted;
     private bool _membersLoaded;
-    private int _goneCount;
 
     public DuplicateGroupViewModel(
-        DuplicateGroup group, bool isFolder, DbSession session, IDialogService dialogs,
+        DuplicateReportSet set, bool isFolder, ReportSession session, IDialogService dialogs,
         Action<DuplicateGroupViewModel> onResolved, Func<Task> onFolderDeleted)
     {
-        _group = group;
+        ArgumentNullException.ThrowIfNull(set);
+        _set = set;
         IsFolder = isFolder;
         _session = session;
         _dialogs = dialogs;
         _onResolved = onResolved;
         _onFolderDeleted = onFolderDeleted;
+        OriginalCopyCount = set.CopyCount;
+        Name = set.Name ?? (set.Locations.Count > 0 ? Path.GetFileName(set.Locations[0]) : "");
     }
 
     public bool IsFolder { get; }
 
-    public string Name => _group.FileName;
+    /// <summary>The shared name, or one member's name when the copies are named differently.</summary>
+    public string Name { get; }
 
     /// <summary>The copies don't all share one name; <see cref="Name"/> is just one of them.</summary>
-    public bool NamesDiffer => _group.DistinctNameCount > 1;
+    public bool NamesDiffer => _set.NamesDiffer;
 
     public string DisplayName => NamesDiffer ? Name + " (names differ)" : Name;
 
-    public long SizeBytes => _group.SizeBytes;
+    public long SizeBytes => _set.SizeBytes;
 
-    public int OriginalCopyCount => _group.CopyCount;
+    /// <summary>The copy count when the report was opened, before this session's deletions.</summary>
+    public int OriginalCopyCount { get; }
 
-    /// <summary>Copies still on disk, as deletions this session are subtracted.</summary>
-    public int RemainingCopies => _group.CopyCount - _goneCount;
+    /// <summary>Copies still on disk — live from the report set as deletions remove locations.</summary>
+    public int RemainingCopies => _set.CopyCount;
 
     /// <summary>Space still reclaimable from this set: the redundant remaining copies × size.</summary>
-    public long WastedBytes => Math.Max(0, RemainingCopies - 1) * _group.SizeBytes;
+    public long WastedBytes => _set.WastedBytes;
 
     public ObservableCollection<GroupMemberViewModel> Members { get; } = [];
 
-    [ObservableProperty]
-    private bool isLoadingMembers;
-
-    /// <summary>Load all member locations the first time the group is selected.</summary>
-    public async Task EnsureMembersLoadedAsync()
+    /// <summary>Materialize member rows from the report's locations the first time the group is opened.</summary>
+    public void EnsureMembersLoaded()
     {
-        if (_membersLoaded || IsLoadingMembers)
+        if (_membersLoaded)
         {
             return;
         }
 
-        IsLoadingMembers = true;
-        try
+        foreach (var path in _set.Locations)
         {
-            var paths = await Task.Run(() => IsFolder
-                ? _session.Analyzer.GetFolderGroupLocationsAsync(_group.ContentHash, _group.SizeBytes, CancellationToken.None)
-                : _session.Analyzer.GetFileGroupLocationsAsync(_group.ContentHash, _group.SizeBytes, CancellationToken.None));
-
-            Members.Clear();
-            foreach (var path in paths)
-            {
-                Members.Add(new GroupMemberViewModel(this, path));
-            }
-
-            _membersLoaded = true;
+            Members.Add(new GroupMemberViewModel(this, path));
         }
-        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException or IOException)
-        {
-            _dialogs.ShowError("Couldn't load locations", ex.Message);
-        }
-        finally
-        {
-            IsLoadingMembers = false;
-        }
+        _membersLoaded = true;
     }
 
     /// <summary>The per-member Delete button: guard, confirm, then delete one copy.</summary>
@@ -110,11 +94,11 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
         if (!exists)
         {
             if (_dialogs.Confirm("Not found on disk",
-                $"This entry no longer exists on disk:\n\n{member.FullPath}\n\nRemove its stale record from the database?"))
+                $"This entry no longer exists on disk:\n\n{member.FullPath}\n\nRemove its stale entry from the report?"))
             {
-                await _session.DeleteService.RemoveStaleRowsAsync(member.FullPath, IsFolder, CancellationToken.None);
+                RemoveFromReport(member.FullPath);
                 MarkGone(member, MemberState.Removed);
-                await NotifyIfFolderContentChangedAsync();
+                await FinishMutationAsync();
             }
             return;
         }
@@ -128,7 +112,7 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
 
         if (await DeleteCoreAsync(member))
         {
-            await NotifyIfFolderContentChangedAsync();
+            await FinishMutationAsync();
         }
     }
 
@@ -183,7 +167,10 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
             }
         }
 
-        await NotifyIfFolderContentChangedAsync();
+        if (deleted > 0)
+        {
+            await FinishMutationAsync();
+        }
 
         if (failed > 0)
         {
@@ -196,19 +183,20 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
         }
     }
 
-    /// <summary>Delete one copy from disk and database, updating its status. No confirmation here.</summary>
+    /// <summary>Delete one copy from disk and the report, updating its status. No confirmation here.</summary>
     private async Task<bool> DeleteCoreAsync(GroupMemberViewModel member)
     {
         var outcome = await _session.DeleteService.DeleteAsync(member.FullPath, IsFolder, CancellationToken.None);
         switch (outcome.Status)
         {
             case DeleteStatus.Deleted:
+                RemoveFromReport(member.FullPath);
                 MarkGone(member, MemberState.Deleted);
                 return true;
 
             case DeleteStatus.AlreadyMissing:
-                // Vanished between listing and deleting; the database row is stale either way.
-                await _session.DeleteService.RemoveStaleRowsAsync(member.FullPath, IsFolder, CancellationToken.None);
+                // Vanished between listing and deleting; the report entry is stale either way.
+                RemoveFromReport(member.FullPath);
                 MarkGone(member, MemberState.Removed);
                 return true;
 
@@ -225,11 +213,26 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Reflect one gone copy in the report. A deleted folder tree cascades: everything the report
+    /// tracked underneath it (file copies and nested folder copies) is stripped as well.
+    /// </summary>
+    private void RemoveFromReport(string fullPath)
+    {
+        if (IsFolder)
+        {
+            _session.Report.RemoveFolderCopy(_set, fullPath);
+        }
+        else
+        {
+            _session.Report.RemoveFileCopy(_set, fullPath);
+        }
+    }
+
     private void MarkGone(GroupMemberViewModel member, MemberState state)
     {
         member.ErrorMessage = null;
         member.State = state;
-        _goneCount++;
         OnPropertyChanged(nameof(RemainingCopies));
         OnPropertyChanged(nameof(WastedBytes));
 
@@ -240,8 +243,24 @@ public sealed partial class DuplicateGroupViewModel : ObservableObject
     }
 
     /// <summary>
-    /// A deleted folder tree also removed file rows that participate in file groups, so the file
-    /// view must re-query after any folder deletion.
+    /// After an action's deletions: persist the edited report, and when a folder tree was removed let
+    /// the file view re-sync (the cascade stripped the tree's files from file sets too).
     /// </summary>
-    private Task NotifyIfFolderContentChangedAsync() => IsFolder ? _onFolderDeleted() : Task.CompletedTask;
+    private async Task FinishMutationAsync()
+    {
+        try
+        {
+            await _session.SaveAsync(CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _dialogs.ShowError("Couldn't update the report file",
+                $"The deletion succeeded, but rewriting the report failed:\n{ex.Message}\n\nThe change is kept in this window and the next successful save will include it.");
+        }
+
+        if (IsFolder)
+        {
+            await _onFolderDeleted();
+        }
+    }
 }

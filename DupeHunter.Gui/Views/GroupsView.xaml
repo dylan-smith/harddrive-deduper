@@ -67,8 +67,6 @@
                     <TextBlock Margin="12,0,0,0">
                         <Run Text="{Binding RemainingCopies, Mode=OneWay}" /><Run Text=" of " /><Run Text="{Binding OriginalCopyCount, Mode=OneWay}" /><Run Text=" copies remain — keep one, delete the rest." />
                     </TextBlock>
-                    <TextBlock Margin="12,0,0,0" Foreground="Gray" Text="loading locations…"
-                               Visibility="{Binding IsLoadingMembers, Converter={StaticResource BoolToVis}}" />
                 </StackPanel>
 
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">

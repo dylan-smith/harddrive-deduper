@@ -6,7 +6,7 @@ namespace DupeHunter.Gui.Services;
 /// <summary>The user preferences that survive between sessions.</summary>
 public sealed class AppSettings
 {
-    public string? LastDatabasePath { get; set; }
+    public string? LastReportPath { get; set; }
     public double MinWastedMb { get; set; } = 1;
 }
 

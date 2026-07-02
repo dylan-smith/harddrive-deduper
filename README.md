@@ -42,8 +42,14 @@ As part of every analysis the tool also writes a **YAML report** (auto-named
 `duplicates-<UTC timestamp>.yml` by default, so repeated runs don't overwrite each other) listing
 *every* duplicate file and folder set whose reclaimable (wasted) space reaches a threshold — **100 MB
 by default** — with *all* of each set's locations, not just the handful shown on the console. This makes
-the report directly actionable (e.g. feed it to a script that deletes the redundant copies). Tune it with
-`--yaml-threshold-mb <n>` and `--yaml-out <path>`, or skip it entirely with `--no-yaml`.
+the report directly actionable. Tune it with `--yaml-threshold-mb <n>` and `--yaml-out <path>`, or skip
+it entirely with `--no-yaml`.
+
+The **`dupehunter-gui` review tool works entirely off this YAML report**: open the `.yml` file, browse
+the duplicate sets, and delete redundant copies. Each deletion updates the report file in place (a set
+that's down to one copy drops out; deleting a folder tree also strips everything the report tracked
+beneath it), so you can close the GUI and pick up where you left off later. The scan database is never
+touched by the GUI — it's only re-read the next time the CLI scans or analyzes.
 
 The report looks like:
 

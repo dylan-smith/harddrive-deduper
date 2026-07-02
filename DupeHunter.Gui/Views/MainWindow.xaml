@@ -23,16 +23,17 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <TextBlock Grid.Column="0" Text="Database:" VerticalAlignment="Center" Margin="0,0,6,0" />
-            <TextBox Grid.Column="1" Text="{Binding DatabasePath, UpdateSourceTrigger=PropertyChanged}"
+            <TextBlock Grid.Column="0" Text="Report:" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <TextBox Grid.Column="1" Text="{Binding ReportPath, UpdateSourceTrigger=PropertyChanged}"
                      VerticalContentAlignment="Center"
-                     ToolTip="Path to the .db file written by the dupehunter CLI. Don't delete files here while a CLI scan is writing this database." />
+                     ToolTip="Path to the duplicates .yml report written by the dupehunter CLI. Deleting copies here updates this file; the scan database is never touched." />
             <Button Grid.Column="2" Content="Open…" Margin="6,0,0,0" Padding="10,2"
-                    Command="{Binding OpenDatabaseCommand}" />
+                    Command="{Binding OpenReportCommand}" />
             <Button Grid.Column="3" Content="Refresh" Margin="6,0,16,0" Padding="10,2"
                     Command="{Binding RefreshCommand}" />
             <TextBlock Grid.Column="4" Text="Min wasted (MB):" VerticalAlignment="Center" Margin="0,0,6,0" />
-            <TextBox Grid.Column="5" Text="{Binding MinWastedMb}" Width="60" VerticalContentAlignment="Center" Margin="0,0,16,0" />
+            <TextBox Grid.Column="5" Text="{Binding MinWastedMb}" Width="60" VerticalContentAlignment="Center" Margin="0,0,16,0"
+                     ToolTip="Hide sets wasting less than this. A view filter only — the report file keeps every set. Takes effect on Refresh." />
             <TextBox Grid.Column="6" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
                      Width="200" VerticalContentAlignment="Center"
                      ToolTip="Filter groups by name" />

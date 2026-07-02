@@ -208,7 +208,7 @@ async Task WriteYamlReportAsync(DuplicateAnalyzer analyzer, CancellationToken ct
             report = await analyzer.FindDuplicatesOverThresholdAsync(options.YamlThresholdBytes, ct, status);
         }
         await DuplicateYamlWriter.WriteAsync(
-            outputPath, report, options.YamlThresholdBytes, generatedUtc, ct);
+            outputPath, DuplicateReport.FromAnalysis(report, options.YamlThresholdBytes, generatedUtc), ct);
 
         var thresholdMb = options.YamlThresholdBytes / (1024.0 * 1024.0);
         Console.WriteLine();

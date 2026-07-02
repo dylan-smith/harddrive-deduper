@@ -6,13 +6,13 @@ namespace DupeHunter.Gui.ViewModels;
 
 public enum MemberState
 {
-    /// <summary>On disk (as far as we know) and still listed in the database.</summary>
+    /// <summary>On disk (as far as we know) and still listed in the report.</summary>
     Present,
 
     /// <summary>Permanently deleted from disk this session.</summary>
     Deleted,
 
-    /// <summary>Was already missing from disk; its stale database rows were removed.</summary>
+    /// <summary>Was already missing from disk; its stale report entry was removed.</summary>
     Removed,
 
     /// <summary>The last delete attempt failed; see <see cref="ErrorMessage"/>.</summary>
@@ -50,7 +50,7 @@ public sealed partial class GroupMemberViewModel : ObservableObject
     {
         MemberState.Present => "",
         MemberState.Deleted => "deleted",
-        MemberState.Removed => "was missing — removed from DB",
+        MemberState.Removed => "was missing — removed from report",
         MemberState.Failed => ErrorMessage ?? "failed",
         _ => "",
     };

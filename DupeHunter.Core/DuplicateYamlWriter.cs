@@ -4,36 +4,34 @@ using System.Text;
 namespace DupeHunter;
 
 /// <summary>
-/// Writes a duplicate analysis to a YAML file: every duplicate file and folder set whose wasted space
-/// meets the configured threshold, with all of its locations listed so the report is directly
-/// actionable (e.g. feed it to a script that deletes the redundant copies). The YAML is emitted by
-/// hand — there is no YAML dependency — so every string is double-quoted and escaped, which lets
-/// Windows paths (backslashes) and awkward file names survive a round-trip.
+/// Writes a <see cref="DuplicateReport"/> to a YAML file: every duplicate file and folder set whose
+/// wasted space meets the configured threshold, with all of its locations listed so the report is
+/// directly actionable (the GUI reviews and edits this file; a script could feed on it too). The YAML
+/// is emitted by hand — there is no YAML dependency — so every string is double-quoted and escaped,
+/// which lets Windows paths (backslashes) and awkward file names survive a round-trip through
+/// <see cref="DuplicateYamlReader"/>.
 /// </summary>
-internal static class DuplicateYamlWriter
+public static class DuplicateYamlWriter
 {
-    /// <summary>
-    /// Serialize <paramref name="analysis"/> to <paramref name="path"/>. <paramref name="thresholdBytes"/>
-    /// is the wasted-space floor the groups were filtered by (recorded in the file for context) and
-    /// <paramref name="generatedUtc"/> stamps the report.
-    /// </summary>
-    public static async Task WriteAsync(
-        string path, DuplicateAnalysis analysis, long thresholdBytes, DateTime generatedUtc, CancellationToken ct)
+    /// <summary>Serialize <paramref name="report"/> to <paramref name="path"/>.</summary>
+    public static async Task WriteAsync(string path, DuplicateReport report, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(report);
+
         var sb = new StringBuilder();
 
         sb.AppendLine("# Duplicate file/folder report produced by dupehunter.");
-        sb.AppendLine($"# Every set below wastes at least {FormatBytes(thresholdBytes)} ({thresholdBytes} bytes) of disk space.");
+        sb.AppendLine($"# Every set below wastes at least {FormatBytes(report.ThresholdBytes)} ({report.ThresholdBytes} bytes) of disk space.");
         sb.AppendLine("# 'wastedBytes' is the space reclaimable by keeping one copy and deleting the rest.");
         sb.AppendLine();
 
-        sb.AppendLine($"generatedUtc: {Q(Iso(generatedUtc))}");
-        sb.AppendLine($"wastedSpaceThresholdBytes: {thresholdBytes}");
-        sb.AppendLine($"totalWastedBytes: {analysis.TotalWastedBytes}");
+        sb.AppendLine($"generatedUtc: {Q(Iso(report.GeneratedUtc))}");
+        sb.AppendLine($"wastedSpaceThresholdBytes: {report.ThresholdBytes}");
+        sb.AppendLine($"totalWastedBytes: {report.TotalWastedBytes}");
 
-        WriteScans(sb, analysis.Scans);
-        WriteGroups(sb, "duplicateFileSets", analysis.Groups);
-        WriteGroups(sb, "duplicateFolderSets", analysis.FolderGroups);
+        WriteScans(sb, report.Scans);
+        WriteSets(sb, "duplicateFileSets", report.FileSets);
+        WriteSets(sb, "duplicateFolderSets", report.FolderSets);
 
         await File.WriteAllTextAsync(path, sb.ToString(), ct);
     }
@@ -55,28 +53,27 @@ internal static class DuplicateYamlWriter
         }
     }
 
-    private static void WriteGroups(StringBuilder sb, string key, IReadOnlyList<DuplicateGroup> groups)
+    private static void WriteSets(StringBuilder sb, string key, IReadOnlyList<DuplicateReportSet> sets)
     {
-        if (groups.Count == 0)
+        if (sets.Count == 0)
         {
             sb.AppendLine($"{key}: []");
             return;
         }
 
         sb.AppendLine($"{key}:");
-        foreach (var g in groups)
+        foreach (var s in sets)
         {
-            var namesDiffer = g.DistinctNameCount > 1;
-            // MIN(FileName) is only meaningful when every copy shares the one name; otherwise emit null.
-            sb.AppendLine($"  - name: {(namesDiffer ? "null" : Q(g.FileName))}");
-            sb.AppendLine($"    namesDiffer: {(namesDiffer ? "true" : "false")}");
-            sb.AppendLine($"    contentHash: {Q(g.ContentHash)}");
-            sb.AppendLine($"    sizeBytes: {g.SizeBytes}");
-            sb.AppendLine($"    copyCount: {g.CopyCount}");
-            sb.AppendLine($"    wastedBytes: {g.WastedBytes}");
+            // A shared name is only meaningful when every copy uses it; otherwise emit null.
+            sb.AppendLine($"  - name: {(s.Name is null ? "null" : Q(s.Name))}");
+            sb.AppendLine($"    namesDiffer: {(s.NamesDiffer ? "true" : "false")}");
+            sb.AppendLine($"    contentHash: {Q(s.ContentHash)}");
+            sb.AppendLine($"    sizeBytes: {s.SizeBytes}");
+            sb.AppendLine($"    copyCount: {s.CopyCount}");
+            sb.AppendLine($"    wastedBytes: {s.WastedBytes}");
 
             sb.AppendLine("    locations:");
-            foreach (var p in g.SamplePaths)
+            foreach (var p in s.Locations)
             {
                 sb.AppendLine($"      - {Q(p)}");
             }
@@ -84,7 +81,7 @@ internal static class DuplicateYamlWriter
     }
 
     /// <summary>An ISO-8601 UTC timestamp (e.g. <c>2026-06-22T16:50:00Z</c>).</summary>
-    private static string Iso(DateTime utc) =>
+    internal static string Iso(DateTime utc) =>
         utc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
     /// <summary>Double-quote and escape a string for a YAML double-quoted scalar.</summary>
